@@ -1,15 +1,15 @@
 import React from 'react';
 import {
-  Image,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
   useWindowDimensions,
 } from 'react-native';
+import { Image } from 'expo-image';
 import colors from '../theme';
 
-export default function HeroCarousel({ items, onSelect }) {
+function HeroCarousel({ items, onSelect }) {
   const { width } = useWindowDimensions();
 
   return (
@@ -33,6 +33,7 @@ export default function HeroCarousel({ items, onSelect }) {
               source={{ uri: image }}
               style={styles.pageImage}
               contentFit="cover"
+              cachePolicy="memory-disk"
             />
             <Text style={styles.title} numberOfLines={2}>
               {title}
@@ -43,6 +44,8 @@ export default function HeroCarousel({ items, onSelect }) {
     </ScrollView>
   );
 }
+
+export default React.memo(HeroCarousel);
 
 const styles = StyleSheet.create({
   carousel: {

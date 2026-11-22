@@ -87,6 +87,50 @@ export async function checkForUpdate() {
   };
 }
 
+// Unduhan yang sedang berjalan — dipertahankan supaya bisa dijeda saat
+// aplikasi ke background lalu dilanjutkan dari byte terakhir (bukan dari nol).
+let activeResumable = null;
+let pauseRequested = false;
+
+export function isDownloadActive() {
+  return activeResumable != null;
+}
+
+// Dipanggil saat aplikasi ke background: hentikan aktivitas jaringan agar
+// hemat baterai & kuota. Mengembalikan true jika ada unduhan yang dijeda.
+export async function pauseActiveDownload() {
+  if (!activeResumable) return false;
+  pauseRequested = true;
+  try {
+    await activeResumable.pauseAsync();
+  } catch (e) {
+    // Unduhan keburu selesai/gagal tepat saat dijeda — abaikan.
+  }
+  return true;
+}
+
+// Dipanggil saat kembali foreground (atau tombol Lanjutkan): sambung unduhan
+// dari posisi terakhir, lalu buka installer sistem seperti biasa.
+export async function resumeActiveDownload() {
+  const resumable = activeResumable;
+  if (!resumable) throw new Error('Tidak ada unduhan yang dijeda');
+  pauseRequested = false;
+  const result = await resumable.resumeAsync();
+  activeResumable = null;
+  if (!result?.uri) throw new Error('Unduhan gagal');
+  await installApkUri(result.uri);
+  return result.uri;
+}
+
+async function installApkUri(uri) {
+  const contentUri = await FileSystem.getContentUriAsync(uri);
+  await IntentLauncher.startActivityAsync('android.intent.action.VIEW', {
+    data: contentUri,
+    flags: 1, // FLAG_GRANT_READ_URI_PERMISSION
+    type: 'application/vnd.android.package-archive',
+  });
+}
+
 // Unduh APK rilis lalu buka installer sistem. progressCb menerima 0..1.
 export async function downloadAndInstallApk(apkUrl, assetName, progressCb) {
   if (Platform.OS !== 'android') {
@@ -107,13 +151,24 @@ export async function downloadAndInstallApk(apkUrl, assetName, progressCb) {
       }
     }
   );
-  const result = await resumable.downloadAsync();
-  if (!result?.uri) throw new Error('Unduhan gagal');
-  const contentUri = await FileSystem.getContentUriAsync(result.uri);
-  await IntentLauncher.startActivityAsync('android.intent.action.VIEW', {
-    data: contentUri,
-    flags: 1, // FLAG_GRANT_READ_URI_PERMISSION
-    type: 'application/vnd.android.package-archive',
-  });
-  return result.uri;
+  activeResumable = resumable;
+  try {
+    const result = await resumable.downloadAsync();
+    activeResumable = null;
+    pauseRequested = false;
+    if (!result?.uri) throw new Error('Unduhan gagal');
+    await installApkUri(result.uri);
+    return result.uri;
+  } catch (e) {
+    if (pauseRequested) {
+      // Bukan kegagalan: unduhan dijeda, resumable dipertahankan untuk resume.
+      pauseRequested = false;
+      const paused = new Error('Unduhan dijeda');
+      paused.code = 'DOWNLOAD_PAUSED';
+      throw paused;
+    }
+    activeResumable = null;
+    pauseRequested = false;
+    throw e;
+  }
 }

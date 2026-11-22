@@ -1,5 +1,6 @@
 import React from 'react';
-import { Image, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { Image } from 'expo-image';
 import colors from '../theme';
 
 function timeAgo(dateString) {
@@ -15,7 +16,7 @@ function timeAgo(dateString) {
   return new Date(time).toLocaleDateString();
 }
 
-export default function ChapterItem({ chapter, onPress }) {
+function ChapterItem({ chapter, onPress }) {
   const number =
     chapter?.chapter_number ?? chapter?.number ?? chapter?.chapter ?? '?';
   const title = chapter?.chapter_title || chapter?.title;
@@ -23,9 +24,14 @@ export default function ChapterItem({ chapter, onPress }) {
   const date = chapter?.release_date || chapter?.created_at;
 
   return (
-    <Pressable style={styles.row} onPress={onPress}>
+    <Pressable style={styles.row} onPress={() => onPress?.(chapter)}>
       {thumbnail ? (
-        <Image source={{ uri: thumbnail }} style={styles.thumbnail} contentFit="cover" />
+        <Image
+          source={{ uri: thumbnail }}
+          style={styles.thumbnail}
+          contentFit="cover"
+          cachePolicy="memory-disk"
+        />
       ) : (
         <View style={[styles.thumbnail, styles.badge]}>
           <Text style={styles.badgeText}>#{number}</Text>
@@ -42,6 +48,8 @@ export default function ChapterItem({ chapter, onPress }) {
     </Pressable>
   );
 }
+
+export default React.memo(ChapterItem);
 
 const styles = StyleSheet.create({
   row: {

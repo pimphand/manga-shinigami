@@ -1,17 +1,17 @@
-import React, { useCallback, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
-  Image,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
   View,
 } from 'react-native';
+import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useFocusEffect, useNavigation } from '@react-navigation/native';
+import { useNavigation } from '@react-navigation/native';
 import { useLibrary } from '../context/LibraryContext';
 import ChapterItem from '../components/ChapterItem';
 import { extractChapterPage, getChapterList, getMangaDetail, normalizeChapter } from '../api/client';
@@ -56,7 +56,13 @@ export default function DetailScreen({ route }) {
     [id]
   );
 
+  // Fetch hanya saat id berganti, bukan setiap fokus — halaman chapter
+  // yang sudah dimuat dipertahankan ketika kembali dari Reader.
+  const loadSeq = useRef(0);
+
   const loadDetail = useCallback(async () => {
+    const seq = ++loadSeq.current;
+    const stillCurrent = () => loadSeq.current === seq;
     const load = async () => {
       setLoading(true);
       setError(null);
@@ -65,14 +71,15 @@ export default function DetailScreen({ route }) {
           getMangaDetail(id),
           fetchChapterPage(null),
         ]);
+        if (!stillCurrent()) return;
         setDetail(detailRes.data?.data ?? detailRes.data);
         setChapters(sortChaptersDesc(firstPage.list));
         setChapterCursor(firstPage.nextCursor);
         setHasMoreChapters(firstPage.hasNext);
       } catch (e) {
-        setError(e?.message || 'Gagal memuat detail manga');
+        if (stillCurrent()) setError(e?.message || 'Gagal memuat detail manga');
       } finally {
-        setLoading(false);
+        if (stillCurrent()) setLoading(false);
       }
     };
     load();
@@ -117,11 +124,12 @@ export default function DetailScreen({ route }) {
     if (nearBottom) loadMoreRef.current?.();
   }, []);
 
-  const onFocus = useCallback(() => {
+  useEffect(() => {
     loadDetail();
+    return () => {
+      loadSeq.current++;
+    };
   }, [loadDetail]);
-
-  useFocusEffect(onFocus);
 
   const getFirstChapter = useCallback(async () => {
     // Chapter 1 = nomor terkecil. Kalau semua halaman sudah dimuat,
@@ -165,27 +173,32 @@ export default function DetailScreen({ route }) {
     });
   }, [lastRead]);
 
-  const onRead = (chapter) => {
-    const chapterId =
-      chapter?.id ?? String(chapter?.chapter_number ?? chapter?.number ?? '');
-    const detailCover =
-      detail?.cover ||
-      detail?.cover_image_url ||
-      detail?.image ||
-      detail?.imageUrl ||
-      detail?.thumbnail_image_url ||
-      null;
-    addHistory({
-      mangaId: id,
-      mangaTitle: detail?.title || detail?.name,
-      mangaCover: detailCover,
-      chapterId,
-      chapterNumber: chapter?.chapter_number ?? chapter?.number,
-      chapterTitle: chapter?.chapter_title || chapter?.title || null,
-      timestamp: Date.now(),
-    });
-    navigation.navigate('Reader', { mangaId: id, chapterId, chapter });
-  };
+  // useCallback + identitas stabil supaya ChapterItem yang di-memo
+  // tidak ikut re-render saat state layar berubah.
+  const onRead = useCallback(
+    (chapter) => {
+      const chapterId =
+        chapter?.id ?? String(chapter?.chapter_number ?? chapter?.number ?? '');
+      const detailCover =
+        detail?.cover ||
+        detail?.cover_image_url ||
+        detail?.image ||
+        detail?.imageUrl ||
+        detail?.thumbnail_image_url ||
+        null;
+      addHistory({
+        mangaId: id,
+        mangaTitle: detail?.title || detail?.name,
+        mangaCover: detailCover,
+        chapterId,
+        chapterNumber: chapter?.chapter_number ?? chapter?.number,
+        chapterTitle: chapter?.chapter_title || chapter?.title || null,
+        timestamp: Date.now(),
+      });
+      navigation.navigate('Reader', { mangaId: id, chapterId, chapter });
+    },
+    [id, detail, addHistory, navigation]
+  );
 
   if (loading) {
     return <Loading />;
@@ -224,7 +237,12 @@ export default function DetailScreen({ route }) {
       onScroll={handleScroll}
     >
       <View style={styles.header}>
-        <Image source={{ uri: cover }} style={styles.cover} contentFit="cover" />
+        <Image
+          source={{ uri: cover }}
+          style={styles.cover}
+          contentFit="cover"
+          cachePolicy="memory-disk"
+        />
         <View style={styles.headerInfo}>
           <View style={styles.titleRow}>
             <Text style={styles.title} numberOfLines={3}>
@@ -292,7 +310,7 @@ export default function DetailScreen({ route }) {
       <Text style={styles.sectionTitle}>Daftar Chapter</Text>
       {chapters.length > 0 ? (
         chapters.map((ch) => (
-          <ChapterItem key={ch.id ?? ch.chapter_number} chapter={ch} onPress={() => onRead(ch)} />
+          <ChapterItem key={ch.id ?? ch.chapter_number} chapter={ch} onPress={onRead} />
         ))
       ) : (
         <Text style={styles.emptyText}>Belum ada chapter</Text>

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   FlatList,
   RefreshControl,
@@ -7,7 +7,6 @@ import {
   View,
 } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
-import { useFocusEffect } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import HeroCarousel from '../components/HeroCarousel';
 import AppButton from '../components/common/AppButton';
@@ -49,11 +48,14 @@ export default function HomeScreen() {
     setRefreshing(false);
   }, [loadHome]);
 
-  useFocusEffect(
-    useCallback(() => {
-      loadHome();
-    }, [loadHome])
-  );
+  // Muat sekali saat mount; refresh berikutnya hanya via pull-to-refresh —
+  // kembali ke tab Home tidak me-fetch ulang home + hero.
+  const loadedRef = useRef(false);
+  useEffect(() => {
+    if (loadedRef.current) return;
+    loadedRef.current = true;
+    loadHome();
+  }, [loadHome]);
 
   const openDetail = useCallback(
     (manga) => {
@@ -62,12 +64,23 @@ export default function HomeScreen() {
     [navigation]
   );
 
-  const renderManga = ({ item }) => (
-    <MangaCard manga={item} onPress={() => openDetail(item)} style={{ width: 140 }} />
+  const renderManga = useCallback(
+    ({ item }) => (
+      <MangaCard manga={item} onPress={openDetail} style={styles.cardNarrow} />
+    ),
+    [openDetail]
   );
 
-  const renderGrid = ({ item }) => (
-    <MangaCard manga={item} onPress={() => openDetail(item)} style={{ flex: 1 }} />
+  const renderGrid = useCallback(
+    ({ item }) => (
+      <MangaCard manga={item} onPress={openDetail} style={styles.cardFlex} />
+    ),
+    [openDetail]
+  );
+
+  const keyExtractor = useCallback(
+    (item, index) => item?.id ?? String(index),
+    []
   );
 
   if (loading) {
@@ -92,7 +105,7 @@ export default function HomeScreen() {
         <FlatList
           data={recommendations}
           renderItem={renderManga}
-          keyExtractor={(item, index) => item?.id ?? String(index)}
+          keyExtractor={keyExtractor}
           horizontal
           showsHorizontalScrollIndicator={false}
           contentContainerStyle={styles.horizontalList}
@@ -112,7 +125,7 @@ export default function HomeScreen() {
     <FlatList
       data={popular}
       renderItem={renderGrid}
-      keyExtractor={(item, index) => item?.id ?? String(index)}
+      keyExtractor={keyExtractor}
       numColumns={2}
       ListHeaderComponent={header}
       style={styles.list}
@@ -130,6 +143,12 @@ export default function HomeScreen() {
 }
 
 const styles = StyleSheet.create({
+  cardNarrow: {
+    width: 140,
+  },
+  cardFlex: {
+    flex: 1,
+  },
   list: {
     flex: 1,
     backgroundColor: '#000000',

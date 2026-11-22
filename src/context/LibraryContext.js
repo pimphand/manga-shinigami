@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useState, useCallback } from 'react';
+import React, { createContext, useContext, useEffect, useMemo, useState, useCallback } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const FAVORITES_KEY = '@shinigami_manga:favorites';
@@ -82,17 +82,22 @@ export function LibraryProvider({ children }) {
     ]);
   }, []);
 
+  // value di-memo supaya konsumen context tidak re-render hanya karena
+  // Provider me-render ulang tanpa perubahan data yang relevan.
+  const value = useMemo(
+    () => ({
+      favorites,
+      history,
+      toggleFavorite,
+      addHistory,
+      clearHistory,
+      replaceLibrary,
+    }),
+    [favorites, history, toggleFavorite, addHistory, clearHistory, replaceLibrary]
+  );
+
   return (
-    <LibraryContext.Provider
-      value={{
-        favorites,
-        history,
-        toggleFavorite,
-        addHistory,
-        clearHistory,
-        replaceLibrary,
-      }}
-    >
+    <LibraryContext.Provider value={value}>
       {children}
     </LibraryContext.Provider>
   );

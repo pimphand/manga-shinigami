@@ -1,10 +1,9 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import AppButton from '../components/common/AppButton';
 import Loading from '../components/common/Loading';
 import colors from '../theme';
 import {
   FlatList,
-  Image,
   Modal,
   Pressable,
   ScrollView,
@@ -50,6 +49,7 @@ function Chips({ options, selected, onSelect }) {
 import { useNavigation } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { extractItems, getMangaLists, normalizeManga } from '../api/client';
+import MangaCard from '../components/MangaCard';
 
 export default function MangaScreen() {
   const navigation = useNavigation();
@@ -80,23 +80,43 @@ export default function MangaScreen() {
     setGenre(CHIP_ALL);
   };
 
+  // Request pencarian basi dibatalkan: hasil query lama yang pulang
+  // belakangan tidak boleh menimpa hasil query terbaru (race condition).
+  const searchAbort = useRef(null);
+
   const loadManga = useCallback(async (search = '', offset = 0) => {
     const append = offset > 0;
-    if (append) setLoadingMore(true);
-    else setLoading(true);
+    let signal;
+    if (append) {
+      setLoadingMore(true);
+    } else {
+      setLoading(true);
+      searchAbort.current?.abort();
+      searchAbort.current = new AbortController();
+      signal = searchAbort.current.signal;
+    }
     setError(null);
     try {
-      const res = await getMangaLists(search.trim(), offset);
+      const res = await getMangaLists(search.trim(), offset, signal);
       const items = extractItems(res.data).map(normalizeManga);
       setMangaList((prev) => (append ? [...prev, ...items] : items));
       setHasNext(Boolean(res.data?.meta?.has_next));
     } catch (e) {
+      // Abort yang disengaja bukan error: abaikan diam-diam.
+      if (e?.code === 'ERR_CANCELED' || e?.name === 'CanceledError') return;
       setError(e?.message || 'Gagal memuat daftar manga');
     } finally {
       setLoading(false);
       setLoadingMore(false);
     }
   }, []);
+
+  useEffect(
+    () => () => {
+      searchAbort.current?.abort();
+    },
+    []
+  );
 
   const loadMore = () => {
     if (loadingMore || loading || !hasNext) return;
@@ -108,32 +128,34 @@ export default function MangaScreen() {
     return () => clearTimeout(timer);
   }, [query, loadManga]);
 
-  const filtered = mangaList.filter((m) => {
+  const filtered = useMemo(() => mangaList.filter((m) => {
     const matchesStatus = status === 'all' || m?.status === status;
     const matchesFormat = format === CHIP_ALL || taxNames(m, 'Format').includes(format);
     const matchesType = type === CHIP_ALL || taxNames(m, 'Type').includes(type);
     const matchesGenre = genre === CHIP_ALL || taxNames(m, 'Genre').includes(genre);
     return matchesStatus && matchesFormat && matchesType && matchesGenre;
-  });
+  }), [mangaList, status, format, type, genre]);
 
-  const openDetail = (manga) => {
-    navigation.navigate('Home', {
-      screen: 'Detail',
-      params: { id: manga?.id },
-    });
-  };
+  const openDetail = useCallback(
+    (manga) => {
+      navigation.navigate('Home', {
+        screen: 'Detail',
+        params: { id: manga?.id },
+      });
+    },
+    [navigation]
+  );
 
-  const renderManga = ({ item }) => (
-    <Pressable style={styles.card} onPress={() => openDetail(item)}>
-      <Image
-        source={{ uri: item?.cover || item?.image || item?.imageUrl }}
-        style={styles.cover}
-        contentFit="cover"
-      />
-      <Text style={styles.title} numberOfLines={2}>
-        {item?.title || item?.name || 'Manga'}
-      </Text>
-    </Pressable>
+  const renderManga = useCallback(
+    ({ item }) => (
+      <MangaCard manga={item} onPress={openDetail} style={styles.card} />
+    ),
+    [openDetail]
+  );
+
+  const keyExtractor = useCallback(
+    (item, index) => item?.id ?? String(index),
+    []
   );
 
   return (
@@ -190,7 +212,7 @@ export default function MangaScreen() {
         <FlatList
           data={filtered}
           renderItem={renderManga}
-          keyExtractor={(item, index) => item?.id ?? String(index)}
+          keyExtractor={keyExtractor}
           numColumns={2}
           contentContainerStyle={styles.grid}
           ListEmptyComponent={

@@ -1,13 +1,13 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   FlatList,
-  Image,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
   View,
 } from 'react-native';
+import { Image } from 'expo-image';
 import { useNavigation } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import AppButton from '../components/common/AppButton';
@@ -32,6 +32,43 @@ function timeAgo(input) {
   return new Date(time).toLocaleDateString();
 }
 
+// Baris riwayat di-memo: hanya re-render jika entri-nya sendiri berubah.
+const HistoryRow = memo(function HistoryRow({ entry, onOpen }) {
+  const cover = entry?.mangaCover ?? entry?.cover ?? entry?.thumbnail ?? null;
+  const number = entry?.chapterNumber ?? entry?.chapter_number ?? '?';
+  const chapterTitle = entry?.chapterTitle || entry?.chapter_title || '';
+  return (
+    <Pressable style={styles.historyRow} onPress={() => onOpen(entry)}>
+      {cover ? (
+        <Image
+          source={{ uri: cover }}
+          style={styles.historyThumb}
+          contentFit="cover"
+          cachePolicy="memory-disk"
+        />
+      ) : (
+        <View style={[styles.historyThumb, styles.historyBadge]}>
+          <Text style={styles.historyBadgeText}>#{number}</Text>
+        </View>
+      )}
+      <View style={styles.historyInfo}>
+        <Text style={styles.historyTitle} numberOfLines={2}>
+          {entry?.mangaTitle ?? 'Manga'}
+        </Text>
+        <Text style={styles.historySub} numberOfLines={1}>
+          Terakhir dibaca: Chapter {number}
+          {chapterTitle ? ` - ${chapterTitle}` : ''}
+        </Text>
+        {entry?.timestamp ? (
+          <Text style={styles.historyTime} numberOfLines={1}>
+            {timeAgo(entry.timestamp)}
+          </Text>
+        ) : null}
+      </View>
+    </Pressable>
+  );
+});
+
 export default function LibraryScreen() {
   const navigation = useNavigation();
   const insets = useSafeAreaInsets();
@@ -53,22 +90,43 @@ export default function LibraryScreen() {
     });
   }, [history]);
 
+  // Cache detail favorit selama sesi: ID yang sudah pernah dimuat tidak
+  // di-request ulang saat daftar favorit berubah (tambah/hapus favorit
+  // lain hanya memuat yang belum ada di cache).
+  const favCache = useRef(new Map());
+
   useEffect(() => {
     let cancelled = false;
     const load = async () => {
+      for (const key of favCache.current.keys()) {
+        if (!favorites.includes(key)) favCache.current.delete(key);
+      }
       if (favorites.length === 0) {
         setFavManga([]);
         setLoadingFavs(false);
         return;
       }
+      const missing = favorites.filter((id) => !favCache.current.has(id));
+      if (missing.length === 0) {
+        setFavManga(
+          favorites.map((id) => favCache.current.get(id)).filter(Boolean)
+        );
+        setLoadingFavs(false);
+        return;
+      }
       setLoadingFavs(true);
       const details = await Promise.all(
-        favorites.map((id) =>
+        missing.map((id) =>
           getMangaDetail(id).then((r) => r.data).catch(() => null)
         )
       );
       if (!cancelled) {
-        setFavManga(details.filter(Boolean));
+        details.forEach((d, i) => {
+          if (d) favCache.current.set(missing[i], d);
+        });
+        setFavManga(
+          favorites.map((id) => favCache.current.get(id)).filter(Boolean)
+        );
         setLoadingFavs(false);
       }
     };
@@ -78,54 +136,37 @@ export default function LibraryScreen() {
     };
   }, [favorites]);
 
-  const openDetail = (manga) => {
-    navigation.navigate('Home', {
-      screen: 'Detail',
-      params: { id: manga?.id },
-    });
-  };
-
-  const openReader = (entry) => {
-    navigation.navigate('Home', {
-      screen: 'Reader',
-      params: { mangaId: entry?.mangaId, chapterId: entry?.chapterId },
-    });
-  };
-
-  const renderFavorite = ({ item }) => (
-    <MangaCard manga={item} onPress={() => openDetail(item)} style={{ flex: 1 }} />
+  const openDetail = useCallback(
+    (manga) => {
+      navigation.navigate('Home', {
+        screen: 'Detail',
+        params: { id: manga?.id },
+      });
+    },
+    [navigation]
   );
 
-  const renderHistory = ({ item }) => {
-    const cover = item?.mangaCover ?? item?.cover ?? item?.thumbnail ?? null;
-    const number = item?.chapterNumber ?? item?.chapter_number ?? '?';
-    const chapterTitle = item?.chapterTitle || item?.chapter_title || '';
-    return (
-      <Pressable style={styles.historyRow} onPress={() => openReader(item)}>
-        {cover ? (
-          <Image source={{ uri: cover }} style={styles.historyThumb} />
-        ) : (
-          <View style={[styles.historyThumb, styles.historyBadge]}>
-            <Text style={styles.historyBadgeText}>#{number}</Text>
-          </View>
-        )}
-        <View style={styles.historyInfo}>
-          <Text style={styles.historyTitle} numberOfLines={2}>
-            {item?.mangaTitle ?? 'Manga'}
-          </Text>
-          <Text style={styles.historySub} numberOfLines={1}>
-            Terakhir dibaca: Chapter {number}
-            {chapterTitle ? ` - ${chapterTitle}` : ''}
-          </Text>
-          {item?.timestamp ? (
-            <Text style={styles.historyTime} numberOfLines={1}>
-              {timeAgo(item.timestamp)}
-            </Text>
-          ) : null}
-        </View>
-      </Pressable>
-    );
-  };
+  const openReader = useCallback(
+    (entry) => {
+      navigation.navigate('Home', {
+        screen: 'Reader',
+        params: { mangaId: entry?.mangaId, chapterId: entry?.chapterId },
+      });
+    },
+    [navigation]
+  );
+
+  const renderFavorite = useCallback(
+    ({ item }) => (
+      <MangaCard manga={item} onPress={openDetail} style={styles.favCard} />
+    ),
+    [openDetail]
+  );
+
+  const renderHistory = useCallback(
+    ({ item }) => <HistoryRow entry={item} onOpen={openReader} />,
+    [openReader]
+  );
 
   return (
     <ScrollView
@@ -185,6 +226,9 @@ export default function LibraryScreen() {
 }
 
 const styles = StyleSheet.create({
+  favCard: {
+    flex: 1,
+  },
   screen: {
     flex: 1,
     backgroundColor: colors.background,

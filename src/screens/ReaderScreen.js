@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
-  Image,
+  FlatList,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -9,7 +9,7 @@ import {
   View,
   useWindowDimensions,
 } from 'react-native';
-import { useFocusEffect } from '@react-navigation/native';
+import { Image } from 'expo-image';
 import {
   chapterPageUrls,
   extractChapterPage,
@@ -28,32 +28,20 @@ const FALLBACK_ASPECT = 0.7;
 // Satu halaman komik: lebar SELALU angka pasti (bukan persen) supaya
 // Yoga tidak gagal resolve ukuran di dalam ScrollView. Tinggi mengikuti
 // aspectRatio dimensi asli + resizeMode contain supaya tidak ter-crop.
-function ReaderPage({ uri, pageWidth }) {
+// spinner=true hanya untuk halaman pertama: halaman lain memakai teks
+// statis agar tidak ada belasan animasi loading berjalan bersamaan.
+const ReaderPage = React.memo(function ReaderPage({ uri, pageWidth, spinner, label }) {
   const url =
     typeof uri === 'string' ? uri : uri?.url || uri?.image || uri?.src;
   const [aspect, setAspect] = useState(null);
   const [status, setStatus] = useState('loading'); // loading | ok | error
   const [attempt, setAttempt] = useState(0);
 
+  // Dimensi asli diambil dari event onLoad expo-image (sudah termasuk
+  // cache disk) — tanpa request ukur tambahan via Image.getSize.
   useEffect(() => {
-    let active = true;
     setAspect(null);
     setStatus(url ? 'loading' : 'error');
-    if (!url) return undefined;
-    Image.getSize(
-      url,
-      (w, h) => {
-        if (active && w > 0 && h > 0) setAspect(w / h);
-      },
-      () => {
-        // Gagal ukur bukan berarti gagal tampil: pakai rasio darurat,
-        // keberhasilan final ditentukan oleh onLoad/onError Image.
-        if (active) setAspect(FALLBACK_ASPECT);
-      }
-    );
-    return () => {
-      active = false;
-    };
   }, [url, attempt]);
 
   const ratio = aspect ?? FALLBACK_ASPECT;
@@ -63,14 +51,24 @@ function ReaderPage({ uri, pageWidth }) {
       <Image
         key={`${url}-${attempt}`}
         source={{ uri: url }}
-        resizeMode="contain"
+        contentFit="contain"
+        cachePolicy="memory-disk"
         style={{ width: pageWidth, aspectRatio: ratio }}
-        onLoad={() => setStatus('ok')}
+        onLoad={(e) => {
+          const w = e?.source?.width;
+          const h = e?.source?.height;
+          setAspect(w > 0 && h > 0 ? w / h : FALLBACK_ASPECT);
+          setStatus('ok');
+        }}
         onError={() => setStatus('error')}
       />
       {status === 'loading' ? (
         <View style={styles.pageOverlay}>
-          <ActivityIndicator size="small" color={colors.accent} />
+          {spinner ? (
+            <ActivityIndicator size="small" color={colors.accent} />
+          ) : (
+            <Text style={styles.pagePlaceholderText}>{label ?? '…'}</Text>
+          )}
         </View>
       ) : null}
       {status === 'error' ? (
@@ -85,7 +83,11 @@ function ReaderPage({ uri, pageWidth }) {
       ) : null}
     </View>
   );
-}
+});
+
+// Cache daftar chapter per manga selama sesi: komik yang sama dibuka ulang
+// (atau chapter diganti) tidak perlu memindai pagination API dari awal lagi.
+const chaptersCache = new Map();
 
 export default function ReaderScreen({ route }) {
   const { mangaId, chapterId, chapter } = route.params || {};
@@ -102,11 +104,16 @@ export default function ReaderScreen({ route }) {
   const [currentPage, setCurrentPage] = useState(0);
   const [pageUrls, setPageUrls] = useState([]);
 
+  const loadSeq = useRef(0);
+
   const loadChapters = useCallback(async () => {
+    const seq = ++loadSeq.current;
+    const stillCurrent = () => loadSeq.current === seq;
     const load = async () => {
       setLoading(true);
       setError(null);
       try {
+        if (!stillCurrent()) return;
         const idKey = (c) => String(c?.id ?? c?.chapter_number ?? c?.number ?? '');
         const findIdx = (arr) => {
           let i = arr.findIndex((c) => idKey(c) === String(chapterId));
@@ -116,46 +123,56 @@ export default function ReaderScreen({ route }) {
           }
           return i;
         };
-        // Muat halaman berikutnya sampai chapter tujuan ketemu
-        // (daftar chapter memakai cursor pagination, 100/chapter per halaman).
-        const first = extractChapterPage((await getChapterList(mangaId)).data);
-        let list = first.items.map(normalizeChapter);
-        let hasNext = first.hasNext;
-        let cursor = first.nextCursor;
-        let idx = findIdx(list);
-        while (idx < 0 && hasNext && cursor) {
-          const page = extractChapterPage(
-            (await getChapterList(mangaId, { cursor })).data
+        let list = chaptersCache.get(String(mangaId));
+        if (!list) {
+          // Muat halaman berikutnya sampai chapter tujuan ketemu
+          // (daftar chapter memakai cursor pagination, 100/chapter per halaman).
+          const first = extractChapterPage((await getChapterList(mangaId)).data);
+          list = first.items.map(normalizeChapter);
+          let hasNext = first.hasNext;
+          let cursor = first.nextCursor;
+          let idx = findIdx(list);
+          while (idx < 0 && hasNext && cursor && stillCurrent()) {
+            const page = extractChapterPage(
+              (await getChapterList(mangaId, { cursor })).data
+            );
+            list = [...list, ...page.items.map(normalizeChapter)];
+            hasNext = page.hasNext;
+            cursor = page.nextCursor;
+            idx = findIdx(list);
+          }
+          list = [...list].sort(
+            (a, b) => (b?.chapter_number ?? 0) - (a?.chapter_number ?? 0)
           );
-          list = [...list, ...page.items.map(normalizeChapter)];
-          hasNext = page.hasNext;
-          cursor = page.nextCursor;
-          idx = findIdx(list);
+          chaptersCache.set(String(mangaId), list);
         }
-        list = [...list].sort(
-          (a, b) => (b?.chapter_number ?? 0) - (a?.chapter_number ?? 0)
-        );
+        if (!stillCurrent()) return;
         setChapters(list);
-        idx = findIdx(list);
+        let idx = findIdx(list);
         if (idx < 0) idx = 0;
         setCurrentIndex(idx);
         setCurrentPage(0);
         const detailRes = await getChapterDetail(list[idx]?.id ?? chapterId);
+        if (!stillCurrent()) return;
         setPageUrls(chapterPageUrls(detailRes.data?.data ?? detailRes.data));
       } catch (e) {
-        setError(e?.message || 'Gagal memuat chapter');
+        if (stillCurrent()) setError(e?.message || 'Gagal memuat chapter');
       } finally {
-        setLoading(false);
+        if (stillCurrent()) setLoading(false);
       }
     };
     load();
   }, [mangaId, chapterId]);
 
-  const onFocus = useCallback(() => {
+  // Fetch hanya saat manga/chapter berganti (termasuk navigasi ke chapter
+  // lain tanpa unmount), BUKAN setiap layar difokuskan — kembali dari
+  // layar lain tidak memuat ulang semuanya.
+  useEffect(() => {
     loadChapters();
+    return () => {
+      loadSeq.current++;
+    };
   }, [loadChapters]);
-
-  useFocusEffect(onFocus);
 
   const currentChapter = chapters[currentIndex] || chapter;
 
@@ -207,9 +224,42 @@ export default function ReaderScreen({ route }) {
     }
   };
 
-  const renderPage = (uri, i) => (
-    <ReaderPage key={i} uri={uri} pageWidth={width} />
+  // Virtualisasi: hanya halaman di sekitar viewport yang di-mount.
+  // ReaderPage di-memo (props: uri + pageWidth stabil) sehingga scroll
+  // tidak me-render ulang halaman yang sudah tampil.
+  const renderPageItem = useCallback(
+    ({ item: uri, index }) => (
+      <View onLayout={onPageLayout(index)}>
+        <ReaderPage
+          uri={uri}
+          pageWidth={width}
+          spinner={index === 0}
+          label={`Halaman ${index + 1}`}
+        />
+      </View>
+    ),
+    [width]
   );
+
+  const renderHorizontalItem = useCallback(
+    ({ item: uri, index }) => (
+      <ScrollView
+        style={{ width }}
+        contentContainerStyle={styles.horizontalPageContent}
+        showsVerticalScrollIndicator={false}
+      >
+        <ReaderPage
+          uri={uri}
+          pageWidth={width}
+          spinner={index === 0}
+          label={`Halaman ${index + 1}`}
+        />
+      </ScrollView>
+    ),
+    [width]
+  );
+
+  const pageKeyExtractor = useCallback((_, index) => String(index), []);
 
   if (loading) {
     return <Loading />;
@@ -242,41 +292,43 @@ export default function ReaderScreen({ route }) {
   return (
     <View style={styles.container}>
       {mode === 'vertical' ? (
-        <ScrollView
+        <FlatList
           ref={scrollRef}
+          data={pageUrls}
+          renderItem={renderPageItem}
+          keyExtractor={pageKeyExtractor}
           style={styles.scroll}
           contentContainerStyle={styles.verticalContent}
           onScroll={onScrollVertical}
           scrollEventThrottle={16}
-        >
-          {pageUrls.map((uri, i) => (
-            <View key={i} onLayout={onPageLayout(i)}>
-              {renderPage(uri, i)}
-            </View>
-          ))}
-          <View style={{ height: 60 }} />
-        </ScrollView>
+          windowSize={3}
+          maxToRenderPerBatch={2}
+          initialNumToRender={2}
+          removeClippedSubviews
+          ListFooterComponent={<View style={{ height: 60 }} />}
+        />
       ) : (
-        <ScrollView
+        <FlatList
           key={chapters[currentIndex]?.id ?? chapterId ?? 'chapter'}
           ref={scrollRef}
+          data={pageUrls}
+          renderItem={renderHorizontalItem}
+          keyExtractor={pageKeyExtractor}
           horizontal
           pagingEnabled
           directionalLockEnabled
           style={styles.horizontalScroll}
           onMomentumScrollEnd={onMomentumHorizontal}
-        >
-          {pageUrls.map((uri, i) => (
-            <ScrollView
-              key={i}
-              style={{ width }}
-              contentContainerStyle={styles.horizontalPageContent}
-              showsVerticalScrollIndicator={false}
-            >
-              {renderPage(uri, i)}
-            </ScrollView>
-          ))}
-        </ScrollView>
+          windowSize={3}
+          maxToRenderPerBatch={1}
+          initialNumToRender={1}
+          removeClippedSubviews
+          getItemLayout={(_, index) => ({
+            length: width,
+            offset: width * index,
+            index,
+          })}
+        />
       )}
 
       <View style={styles.controls}>
@@ -333,6 +385,10 @@ const styles = StyleSheet.create({
     color: colors.secondaryText,
     fontSize: 13,
     textAlign: 'center',
+  },
+  pagePlaceholderText: {
+    color: colors.inactive,
+    fontSize: 13,
   },
   verticalContent: {
     paddingTop: 0,

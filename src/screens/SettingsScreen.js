@@ -1,7 +1,8 @@
-import React, { useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  AppState,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -18,6 +19,8 @@ import colors from '../theme';
 import {
   checkForUpdate,
   downloadAndInstallApk,
+  pauseActiveDownload,
+  resumeActiveDownload,
   getCurrentVersion,
   GITHUB_OWNER,
   GITHUB_REPO,
@@ -29,7 +32,7 @@ export default function SettingsScreen() {
   const insets = useSafeAreaInsets();
   const { favorites, history, replaceLibrary } = useLibrary();
 
-  const [updateState, setUpdateState] = useState('idle'); // idle | checking | available | downloading | uptodate | error
+  const [updateState, setUpdateState] = useState('idle'); // idle | checking | available | downloading | paused | uptodate | error
   const [updateInfo, setUpdateInfo] = useState(null);
   const [updateError, setUpdateError] = useState(null);
   const [progress, setProgress] = useState(0);
@@ -59,6 +62,46 @@ export default function SettingsScreen() {
     }
   };
 
+  // Satu-satunya jalur resume supaya AppState foreground dan tombol manual
+  // tidak bisa melanjutkan unduhan yang sama dua kali.
+  const resumeGuard = useRef(false);
+  const doResumeDownload = useCallback(async () => {
+    if (resumeGuard.current) return;
+    resumeGuard.current = true;
+    setUpdateState('downloading');
+    setUpdateError(null);
+    try {
+      await resumeActiveDownload();
+      setUpdateState('available');
+      setProgress(0);
+    } catch (e) {
+      setUpdateState('error');
+      setUpdateError(e?.message || 'Gagal melanjutkan unduhan');
+    } finally {
+      resumeGuard.current = false;
+    }
+  }, []);
+
+  // Unduhan dijeda saat ke background (hemat baterai/kuota), dilanjut
+  // otomatis saat kembali foreground — tanpa mengulang dari nol.
+  const updateStateRef = useRef(updateState);
+  updateStateRef.current = updateState;
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (s) => {
+      const st = updateStateRef.current;
+      if (s === 'background' || s === 'inactive') {
+        if (st === 'downloading') {
+          pauseActiveDownload().then((ok) => {
+            if (ok) setUpdateState('paused');
+          });
+        }
+      } else if (s === 'active' && st === 'paused') {
+        doResumeDownload();
+      }
+    });
+    return () => sub.remove();
+  }, [doResumeDownload]);
+
   const onDownloadUpdate = async () => {
     if (!updateInfo?.apkUrl) return;
     setUpdateState('downloading');
@@ -69,6 +112,10 @@ export default function SettingsScreen() {
       setUpdateState('available');
       setProgress(0);
     } catch (e) {
+      if (e?.code === 'DOWNLOAD_PAUSED') {
+        setUpdateState('paused');
+        return;
+      }
       setUpdateState('error');
       setUpdateError(e?.message || 'Gagal mengunduh pembaruan');
     }
@@ -160,7 +207,7 @@ export default function SettingsScreen() {
         {updateState === 'error' ? (
           <Text style={styles.errText}>{updateError}</Text>
         ) : null}
-        {updateState === 'downloading' ? (
+        {updateState === 'downloading' || updateState === 'paused' ? (
           <View style={styles.progressBar}>
             <View style={[styles.progressFill, { width: `${Math.round(progress * 100)}%` }]} />
           </View>
@@ -173,6 +220,16 @@ export default function SettingsScreen() {
                 ? 'Memeriksa pembaruan...'
                 : `Mengunduh... ${Math.round(progress * 100)}%`}
             </Text>
+          </View>
+        ) : updateState === 'paused' ? (
+          <View>
+            <Text style={styles.descText}>
+              Unduhan dijeda {Math.round(progress * 100)}% (aplikasi sempat ke
+              background). Dilanjutkan otomatis saat aplikasi dibuka.
+            </Text>
+            <Pressable style={styles.primaryButton} onPress={doResumeDownload}>
+              <Text style={styles.primaryButtonText}>Lanjutkan Sekarang</Text>
+            </Pressable>
           </View>
         ) : updateState === 'available' ? (
           <Pressable style={styles.primaryButton} onPress={onDownloadUpdate}>
@@ -228,9 +285,6 @@ export default function SettingsScreen() {
         <Text style={styles.versionText}>Shinigami Manga</Text>
         <Text style={styles.descText}>
           Versi {getCurrentVersion()} (build {buildNumber})
-        </Text>
-        <Text style={styles.descText}>
-          Sumber pembaruan: github.com/{GITHUB_OWNER}/{GITHUB_REPO}
         </Text>
       </View>
     </ScrollView>

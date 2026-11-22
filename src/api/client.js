@@ -8,7 +8,21 @@ const api = axios.create({
   timeout: 10000,
 });
 
-export const getMangaLists = (q, offset = 0) =>
+// Retry ringan: 1x untuk kegagalan jaringan/timeout atau 5xx.
+// Tidak retry untuk 4xx, request yang dibatalkan, atau yang sudah di-retry.
+api.interceptors.response.use(undefined, async (error) => {
+  const { config, response } = error || {};
+  const retriable =
+    !response || (response.status >= 500 && response.status < 600);
+  if (!config || !retriable || config.__retried || config.signal?.aborted) {
+    return Promise.reject(error);
+  }
+  config.__retried = true;
+  await new Promise((r) => setTimeout(r, 800));
+  return api(config);
+});
+
+export const getMangaLists = (q, offset = 0, signal) =>
   api.get('/manga/list', {
     params: {
       sort: 'latest',
@@ -17,6 +31,7 @@ export const getMangaLists = (q, offset = 0) =>
       limit: 24,
       ...(q ? { q } : {}),
     },
+    ...(signal ? { signal } : {}),
   });
 export const getTaxonomyList = (type) =>
   api.get('/taxonomy/list', { params: { type } });

@@ -5,12 +5,13 @@ import { useFonts } from 'expo-font';
 import { Ionicons } from '@expo/vector-icons';
 import { LibraryProvider } from './src/context/LibraryContext';
 import BottomTabs from './src/navigation/BottomTabs';
+import Loading from './src/components/common/Loading';
 
 export default function App() {
   const [fontsLoaded] = useFonts(Ionicons.font);
 
   if (!fontsLoaded) {
-    return null;
+    return <Loading />;
   }
 
   return (
