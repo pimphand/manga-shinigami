@@ -1,5 +1,7 @@
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useRef, useState } from 'react';
 import {
+  ActivityIndicator,
+  Alert,
   Image,
   Pressable,
   ScrollView,
@@ -12,35 +14,61 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import { useLibrary } from '../context/LibraryContext';
 import ChapterItem from '../components/ChapterItem';
-import { extractItems, getChapterList, getMangaDetail, normalizeChapter } from '../api/client';
+import { extractChapterPage, getChapterList, getMangaDetail, normalizeChapter } from '../api/client';
 import colors from '../theme';
 import Loading from '../components/common/Loading';
+
+const CHAPTER_PAGE_SIZE = 100;
 
 export default function DetailScreen({ route }) {
   const { id } = route.params || {};
   const navigation = useNavigation();
   const insets = useSafeAreaInsets();
-  const { favorites, toggleFavorite, addHistory } = useLibrary();
+  const { favorites, toggleFavorite, addHistory, history } = useLibrary();
+  const [starting, setStarting] = useState(false);
+
+  // Entri terakhir yang dibaca untuk komik ini (history urut terbaru dulu).
+  const lastRead = history.find((h) => String(h?.mangaId) === String(id));
   const [detail, setDetail] = useState(null);
   const [chapters, setChapters] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMoreChapters, setHasMoreChapters] = useState(true);
+  const [chapterCursor, setChapterCursor] = useState(null);
   const [error, setError] = useState(null);
+
+  const sortChaptersDesc = (list) =>
+    [...list].sort(
+      (a, b) => (b?.chapter_number ?? 0) - (a?.chapter_number ?? 0)
+    );
+
+  const fetchChapterPage = useCallback(
+    async (cursor) => {
+      const chapterRes = await getChapterList(id, {
+        limit: CHAPTER_PAGE_SIZE,
+        ...(cursor ? { cursor } : {}),
+      });
+      const { items, hasNext, nextCursor } = extractChapterPage(
+        chapterRes.data
+      );
+      return { list: items.map(normalizeChapter), hasNext, nextCursor };
+    },
+    [id]
+  );
 
   const loadDetail = useCallback(async () => {
     const load = async () => {
       setLoading(true);
       setError(null);
       try {
-        const [detailRes, chapterRes] = await Promise.all([
+        const [detailRes, firstPage] = await Promise.all([
           getMangaDetail(id),
-          getChapterList(id),
+          fetchChapterPage(null),
         ]);
         setDetail(detailRes.data?.data ?? detailRes.data);
-        const list = extractItems(chapterRes.data).map(normalizeChapter);
-        const sorted = [...list].sort(
-          (a, b) => (b?.chapter_number ?? 0) - (a?.chapter_number ?? 0)
-        );
-        setChapters(sorted);
+        setChapters(sortChaptersDesc(firstPage.list));
+        setChapterCursor(firstPage.nextCursor);
+        setHasMoreChapters(firstPage.hasNext);
       } catch (e) {
         setError(e?.message || 'Gagal memuat detail manga');
       } finally {
@@ -48,13 +76,94 @@ export default function DetailScreen({ route }) {
       }
     };
     load();
-  }, [id]);
+  }, [id, fetchChapterPage]);
+
+  const loadMoreChapters = useCallback(async () => {
+    if (loading || loadingMore || !hasMoreChapters) return;
+    setLoadingMore(true);
+    try {
+      const page = await fetchChapterPage(chapterCursor);
+      if (page.list.length === 0) {
+        setHasMoreChapters(false);
+        return;
+      }
+      setChapters((prev) => {
+        const merged = [...prev, ...page.list];
+        const seen = new Set();
+        const unique = merged.filter((ch) => {
+          const key = ch?.id ?? ch?.chapter_number;
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
+        return sortChaptersDesc(unique);
+      });
+      setChapterCursor(page.nextCursor);
+      setHasMoreChapters(page.hasNext);
+    } catch (e) {
+      // Biarkan daftar yang sudah ada tetap tampil; coba lagi saat scroll.
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [id, loading, loadingMore, hasMoreChapters, chapterCursor, fetchChapterPage]);
+
+  const loadMoreRef = useRef(loadMoreChapters);
+  loadMoreRef.current = loadMoreChapters;
+
+  const handleScroll = useCallback(({ nativeEvent }) => {
+    const { layoutMeasurement, contentOffset, contentSize } = nativeEvent;
+    const nearBottom =
+      layoutMeasurement.height + contentOffset.y >= contentSize.height - 400;
+    if (nearBottom) loadMoreRef.current?.();
+  }, []);
 
   const onFocus = useCallback(() => {
     loadDetail();
   }, [loadDetail]);
 
   useFocusEffect(onFocus);
+
+  const getFirstChapter = useCallback(async () => {
+    // Chapter 1 = nomor terkecil. Kalau semua halaman sudah dimuat,
+    // ambil dari daftar lokal; kalau belum, minta 1 item ascending ke API.
+    if (!hasMoreChapters && chapters.length > 0) {
+      return [...chapters].sort(
+        (a, b) => (a?.chapter_number ?? 0) - (b?.chapter_number ?? 0)
+      )[0];
+    }
+    const res = await getChapterList(id, {
+      sort_by: 'chapter_number',
+      sort_order: 'asc',
+      limit: 1,
+    });
+    return extractChapterPage(res.data).items.map(normalizeChapter)[0];
+  }, [id, hasMoreChapters, chapters]);
+
+  const onStartReading = useCallback(async () => {
+    if (starting) return;
+    setStarting(true);
+    try {
+      const first = await getFirstChapter();
+      if (!first) {
+        Alert.alert('Gagal', 'Chapter 1 tidak ditemukan');
+        return;
+      }
+      onRead(first);
+    } catch (e) {
+      Alert.alert('Gagal', e?.message || 'Gagal memuat chapter 1');
+    } finally {
+      setStarting(false);
+    }
+  }, [starting, getFirstChapter]);
+
+  const onContinue = useCallback(() => {
+    if (!lastRead) return;
+    onRead({
+      id: lastRead.chapterId,
+      chapter_number: lastRead.chapterNumber,
+      chapter_title: lastRead.chapterTitle,
+    });
+  }, [lastRead]);
 
   const onRead = (chapter) => {
     const chapterId =
@@ -111,6 +220,8 @@ export default function DetailScreen({ route }) {
     <ScrollView
       style={styles.screen}
       contentContainerStyle={[styles.content, { paddingTop: insets.top + 8 }]}
+      scrollEventThrottle={16}
+      onScroll={handleScroll}
     >
       <View style={styles.header}>
         <Image source={{ uri: cover }} style={styles.cover} contentFit="cover" />
@@ -139,6 +250,45 @@ export default function DetailScreen({ route }) {
         </View>
       </View>
 
+      <View style={styles.actionRow}>
+        {lastRead ? (
+          <>
+            <Pressable style={styles.primaryButton} onPress={onContinue}>
+              <Ionicons name="play" size={18} color="#000" />
+              <Text style={styles.primaryText}>
+                Lanjutkan Baca — Ch. {lastRead.chapterNumber ?? ''}
+              </Text>
+            </Pressable>
+            <Pressable
+              style={styles.secondaryButton}
+              onPress={onStartReading}
+              disabled={starting}
+            >
+              {starting ? (
+                <ActivityIndicator size="small" color={colors.accent} />
+              ) : (
+                <Text style={styles.secondaryText}>Ulangi dari Chapter 1</Text>
+              )}
+            </Pressable>
+          </>
+        ) : (
+          <Pressable
+            style={styles.primaryButton}
+            onPress={onStartReading}
+            disabled={starting}
+          >
+            {starting ? (
+              <ActivityIndicator size="small" color="#000" />
+            ) : (
+              <>
+                <Ionicons name="play" size={18} color="#000" />
+                <Text style={styles.primaryText}>Mulai Baca</Text>
+              </>
+            )}
+          </Pressable>
+        )}
+      </View>
+
       <Text style={styles.sectionTitle}>Daftar Chapter</Text>
       {chapters.length > 0 ? (
         chapters.map((ch) => (
@@ -147,6 +297,15 @@ export default function DetailScreen({ route }) {
       ) : (
         <Text style={styles.emptyText}>Belum ada chapter</Text>
       )}
+      {loadingMore ? (
+        <View style={styles.loadMore}>
+          <ActivityIndicator size="small" color={colors.accent} />
+          <Text style={styles.loadMoreText}>Memuat chapter lainnya...</Text>
+        </View>
+      ) : null}
+      {!hasMoreChapters && chapters.length > 0 ? (
+        <Text style={styles.endText}>Semua chapter sudah dimuat</Text>
+      ) : null}
     </ScrollView>
   );
 }
@@ -175,6 +334,23 @@ const styles = StyleSheet.create({
     color: colors.inactive,
     textAlign: 'center',
     paddingVertical: 24,
+  },
+  loadMore: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 16,
+    gap: 8,
+  },
+  loadMoreText: {
+    color: colors.secondaryText,
+    fontSize: 13,
+  },
+  endText: {
+    color: colors.inactive,
+    fontSize: 12,
+    textAlign: 'center',
+    paddingVertical: 16,
   },
   header: {
     flexDirection: 'row',
@@ -214,6 +390,38 @@ const styles = StyleSheet.create({
     color: colors.secondaryText,
     fontSize: 12,
     marginTop: 4,
+  },
+  actionRow: {
+    paddingHorizontal: 16,
+    paddingTop: 16,
+    gap: 8,
+  },
+  primaryButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.accent,
+    borderRadius: 10,
+    paddingVertical: 12,
+    gap: 8,
+  },
+  primaryText: {
+    color: '#000',
+    fontSize: 15,
+    fontWeight: '700',
+  },
+  secondaryButton: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: colors.accent,
+    borderRadius: 10,
+    paddingVertical: 10,
+  },
+  secondaryText: {
+    color: colors.accent,
+    fontSize: 14,
+    fontWeight: '600',
   },
   sectionTitle: {
     color: colors.text,

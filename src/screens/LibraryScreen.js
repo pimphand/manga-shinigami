@@ -1,6 +1,5 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
-  Alert,
   FlatList,
   Image,
   Pressable,
@@ -9,10 +8,6 @@ import {
   Text,
   View,
 } from 'react-native';
-import * as Sharing from 'expo-sharing';
-import * as DocumentPicker from 'expo-document-picker';
-import { exportLibraryToSqlite } from '../lib/exportLibraryToSqlite';
-import { importLibraryFromSqlite } from '../lib/importLibraryFromSqlite';
 import { useNavigation } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import AppButton from '../components/common/AppButton';
@@ -40,13 +35,23 @@ function timeAgo(input) {
 export default function LibraryScreen() {
   const navigation = useNavigation();
   const insets = useSafeAreaInsets();
-  const { favorites, history, clearHistory, replaceLibrary } = useLibrary();
+  const { favorites, history, clearHistory } = useLibrary();
   const [favManga, setFavManga] = useState([]);
   const [loadingFavs, setLoadingFavs] = useState(false);
   const [favLimit, setFavLimit] = useState(PAGE_SIZE);
   const [historyLimit, setHistoryLimit] = useState(PAGE_SIZE);
-  const [exporting, setExporting] = useState(false);
-  const [importing, setImporting] = useState(false);
+
+  // Satu judul tampil satu kali saja: ambil entri TERAKHIR dibaca per manga.
+  // history urut terbaru dulu, jadi kemunculan pertama per mangaId menang.
+  const uniqueHistory = useMemo(() => {
+    const seen = new Set();
+    return history.filter((h) => {
+      const key = h?.mangaId != null ? String(h.mangaId) : `chapter:${h?.chapterId}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }, [history]);
 
   useEffect(() => {
     let cancelled = false;
@@ -85,70 +90,6 @@ export default function LibraryScreen() {
       screen: 'Reader',
       params: { mangaId: entry?.mangaId, chapterId: entry?.chapterId },
     });
-  };
-
-  const handleExport = async () => {
-    if (favorites.length === 0 && history.length === 0) {
-      Alert.alert('Pustaka kosong', 'Belum ada favorit atau riwayat untuk diekspor.');
-      return;
-    }
-    setExporting(true);
-    try {
-      const result = await exportLibraryToSqlite({ favorites, history });
-      const available = await Sharing.isAvailableAsync();
-      if (available) {
-        await Sharing.shareAsync(result.uri, {
-          mimeType: 'application/x-sqlite3',
-          dialogTitle: 'Export Pustaka (SQLite)',
-          UTI: 'public.database',
-        });
-      }
-      Alert.alert(
-        'Export selesai',
-        `${result.favorites} favorit dan ${result.history} riwayat tersimpan ke ${result.fileName}` +
-          (available ? '' : `\nLokasi: ${result.uri}`)
-      );
-    } catch (e) {
-      Alert.alert('Export gagal', e?.message ?? 'Terjadi kesalahan saat mengekspor.');
-    } finally {
-      setExporting(false);
-    }
-  };
-
-  const handleImport = async () => {
-    setImporting(true);
-    try {
-      const picked = await DocumentPicker.getDocumentAsync({
-        type: '*/*',
-        copyToCacheDirectory: true,
-      });
-      if (picked.canceled) return;
-      const uri = picked.assets?.[0]?.uri;
-      const data = await importLibraryFromSqlite(uri);
-      Alert.alert(
-        'Import pustaka?',
-        `${data.favorites.length} favorit dan ${data.history.length} riwayat dari file akan menggantikan data saat ini.`,
-        [
-          { text: 'Batal', style: 'cancel' },
-          {
-            text: 'Ganti',
-            style: 'destructive',
-            onPress: async () => {
-              try {
-                await replaceLibrary(data);
-                Alert.alert('Import selesai', 'Pustaka berhasil diganti dari file SQLite.');
-              } catch (e) {
-                Alert.alert('Import gagal', e?.message ?? 'Gagal menyimpan data import.');
-              }
-            },
-          },
-        ]
-      );
-    } catch (e) {
-      Alert.alert('Import gagal', e?.message ?? 'Terjadi kesalahan saat mengimpor.');
-    } finally {
-      setImporting(false);
-    }
   };
 
   const renderFavorite = ({ item }) => (
@@ -191,22 +132,6 @@ export default function LibraryScreen() {
       style={styles.screen}
       contentContainerStyle={[styles.content, { paddingTop: insets.top + 8 }]}
     >
-      <View style={styles.ioRow}>
-        <AppButton
-          title="Import"
-          variant="outline"
-          loading={importing}
-          onPress={handleImport}
-          style={styles.ioButton}
-        />
-        <AppButton
-          title="Export"
-          variant="outline"
-          loading={exporting}
-          onPress={handleExport}
-          style={styles.ioButton}
-        />
-      </View>
       <Text style={styles.sectionTitle}>Favorit</Text>
       {favorites.length === 0 ? (
         <Text style={styles.emptyText}>Belum ada manga favorit</Text>
@@ -232,22 +157,22 @@ export default function LibraryScreen() {
 
       <View style={styles.historyHeader}>
         <Text style={styles.sectionTitle}>Riwayat Membaca</Text>
-        {history.length > 0 ? (
+        {uniqueHistory.length > 0 ? (
           <Pressable onPress={clearHistory}>
             <Text style={styles.clearText}>Bersihkan</Text>
           </Pressable>
         ) : null}
       </View>
-      {history.length === 0 ? (
+      {uniqueHistory.length === 0 ? (
         <Text style={styles.emptyText}>Belum ada riwayat membaca</Text>
       ) : (
         <View style={styles.historyList}>
-          {history.slice(0, historyLimit).map((item, index) => (
+          {uniqueHistory.slice(0, historyLimit).map((item, index) => (
             <View key={String(item?.chapterId ?? index)}>{renderHistory({ item })}</View>
           ))}
         </View>
       )}
-      {history.length > historyLimit && (
+      {uniqueHistory.length > historyLimit && (
         <AppButton
           title="Tampilkan lebih banyak"
           variant="outline"
@@ -359,14 +284,5 @@ const styles = StyleSheet.create({
   moreButton: {
     alignSelf: 'center',
     marginTop: 12,
-  },
-  ioRow: {
-    flexDirection: 'row',
-    paddingHorizontal: 16,
-    marginTop: 8,
-    gap: 8,
-  },
-  ioButton: {
-    flex: 1,
   },
 });

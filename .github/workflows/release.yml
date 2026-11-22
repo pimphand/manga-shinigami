@@ -1,0 +1,273 @@
+name: Build & Release Android APK
+
+# Cara pakai:
+#   1. Naikkan "version" di app.json + package.json dan "versionCode" di app.json.
+#   2. Buat tag lalu push:  git tag v1.1.0 && git push origin v1.1.0
+#   3. Workflow membangun APK per-ABI, menandatangani dengan keystore rilis,
+#      lalu membuat GitHub Release berisi file APK.
+#   4. User update dari dalam aplikasi (Profil > Cek Pembaruan).
+#
+# Secrets yang wajib ada (Settings > Secrets and variables > Actions):
+#   ANDROID_KEYSTORE_BASE64     isi file .keystore/.jks dalam base64
+#   ANDROID_KEYSTORE_PASSWORD   password keystore
+#   ANDROID_KEY_ALIAS           alias key
+#   ANDROID_KEY_PASSWORD         password key
+# Opsional:
+#   EXPO_PUBLIC_API_URL         override base URL API saat build (https://...)
+#
+# PENTING: APK harus selalu ditandatangani keystore yang SAMA agar update
+# dari dalam aplikasi diterima Android. Build lokal (debug key) tidak boleh
+# dipublikasikan sebagai rilis.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      api_url:
+        description: 'Override EXPO_PUBLIC_API_URL (https://...). Kosongkan untuk pakai secret/default.'
+        type: string
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-apk-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: '22'
+  JAVA_VERSION: '17'
+
+jobs:
+  build-release-apk:
+    name: Build signed release APK
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Validate tag matches app version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          node <<'NODE'
+          const { expo } = require('./app.json');
+          const pkg = require('./package.json');
+          const tag = process.env.GITHUB_REF_NAME || '';
+          const tagVersion = tag.replace(/^v/, '');
+          const errors = [];
+          if (!tagVersion) errors.push(`Tag "${tag}" tidak diawali huruf v (contoh: v1.1.0).`);
+          if (expo?.version !== tagVersion) errors.push(`app.json version (${expo?.version}) != tag (${tagVersion}).`);
+          if (pkg?.version !== tagVersion) errors.push(`package.json version (${pkg?.version}) != tag (${tagVersion}).`);
+          if (errors.length) {
+            for (const e of errors) console.error(`::error::${e}`);
+            process.exit(1);
+          }
+          console.log(`Tag ${tag} cocok dengan versi aplikasi ${tagVersion}.`);
+          NODE
+
+      - name: Validate secrets & API URL
+        env:
+          INPUT_API_URL: ${{ inputs.api_url }}
+          SECRET_API_URL: ${{ secrets.EXPO_PUBLIC_API_URL }}
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require('node:fs');
+          const { env } = process;
+          for (const name of [
+            'ANDROID_KEYSTORE_BASE64', 'ANDROID_KEYSTORE_PASSWORD',
+            'ANDROID_KEY_ALIAS', 'ANDROID_KEY_PASSWORD',
+          ]) {
+            if (!env[name]) {
+              console.error(`::error::Missing secret ${name}`);
+              process.exitCode = 1;
+            }
+          }
+          const apiUrl = (env.INPUT_API_URL?.trim() || env.SECRET_API_URL?.trim() || '');
+          if (apiUrl) {
+            if (!apiUrl.startsWith('https://')) {
+              console.error('::error::EXPO_PUBLIC_API_URL harus diawali https://');
+              process.exitCode = 1;
+            } else {
+              fs.appendFileSync(env.GITHUB_ENV, `EXPO_PUBLIC_API_URL=${apiUrl}\n`);
+              console.log('EXPO_PUBLIC_API_URL dipakai dari input/secret.');
+            }
+          }
+          if (process.exitCode) process.exit(process.exitCode);
+          NODE
+
+      - name: Set up JDK
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate native Android project
+        run: npx expo prebuild --platform android --clean --no-install
+
+      - name: Configure ABI splits + release signing
+        # prebuild --clean me-regenerate android/ dari template, jadi patch
+        # splits (seperti scripts/build-apk.js) + signingConfig rilis
+        # dipasang ulang di sini setiap build CI.
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require('node:fs');
+          const f = 'android/app/build.gradle';
+          let s = fs.readFileSync(f, 'utf8');
+
+          // 1. Pecah APK per ABI supaya ukuran kecil (arm64 + armeabi).
+          if (!s.includes('universalApk false')) {
+            const anchor = '    packagingOptions {';
+            if (!s.includes(anchor)) throw new Error('packagingOptions block tidak ditemukan di android/app/build.gradle');
+            s = s.replace(anchor,
+              '    splits {\n' +
+              '        abi {\n' +
+              '            reset()\n' +
+              '            enable true\n' +
+              '            include "armeabi-v7a", "arm64-v8a"\n' +
+              '            universalApk false\n' +
+              '        }\n' +
+              '    }\n' + anchor);
+            console.log('ABI splits dipasang.');
+          }
+
+          // 2. signingConfig rilis membaca dari gradle.properties (diisi step berikutnya).
+          if (!s.includes('MYAPP_RELEASE_STORE_FILE')) {
+            const debugBlock = [
+              '        debug {',
+              "            storeFile file('debug.keystore')",
+              "            storePassword 'android'",
+              "            keyAlias 'androiddebugkey'",
+              "            keyPassword 'android'",
+              '        }',
+            ].join('\n');
+            if (!s.includes(debugBlock)) throw new Error('Blok debug signingConfig tidak ditemukan - template berubah');
+            const releaseBlock = [
+              '        release {',
+              "            storeFile file(findProperty('MYAPP_RELEASE_STORE_FILE') ?: 'release.keystore')",
+              "            storePassword findProperty('MYAPP_RELEASE_STORE_PASSWORD')",
+              "            keyAlias findProperty('MYAPP_RELEASE_KEY_ALIAS')",
+              "            keyPassword findProperty('MYAPP_RELEASE_KEY_PASSWORD')",
+              '        }',
+            ].join('\n');
+            s = s.replace(debugBlock, debugBlock + '\n' + releaseBlock);
+            console.log('Release signingConfig dipasang.');
+          }
+
+          // 3. BuildType release memakai signingConfig rilis (bukan debug).
+          const re = /(buildTypes\s*\{\s*debug\s*\{\s*signingConfig\s+signingConfigs\.debug\s*\}\s*release\s*\{[^}]*?)signingConfig\s+signingConfigs\.debug/;
+          if (!re.test(s)) throw new Error('Blok buildTypes.release tidak ditemukan - template berubah');
+          s = s.replace(re, '$1signingConfig signingConfigs.release');
+
+          fs.writeFileSync(f, s);
+          if (!s.includes('signingConfigs.release')) throw new Error('Patch signingConfig gagal');
+          console.log('BuildType release memakai signingConfigs.release.');
+          NODE
+
+          # Keystore + kredensial signing (hanya hidup di runner ini).
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > android/app/release.keystore
+          test -s android/app/release.keystore || { echo '::error::ANDROID_KEYSTORE_BASE64 tidak valid.'; exit 1; }
+          {
+            echo 'MYAPP_RELEASE_STORE_FILE=release.keystore'
+            echo "MYAPP_RELEASE_STORE_PASSWORD=$ANDROID_KEYSTORE_PASSWORD"
+            echo "MYAPP_RELEASE_KEY_ALIAS=$ANDROID_KEY_ALIAS"
+            echo "MYAPP_RELEASE_KEY_PASSWORD=$ANDROID_KEY_PASSWORD"
+          } >> android/gradle.properties
+          echo 'Keystore & gradle.properties siap.'
+
+      - name: Assemble release APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:assembleRelease --parallel -PreactNativeArchitectures="armeabi-v7a,arm64-v8a" --no-daemon --stacktrace
+
+      - name: Collect versioned APKs
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const { expo } = require('./app.json');
+          const version = expo?.version ?? '1.0.0';
+          fs.mkdirSync('build', { recursive: true });
+          const artifacts = [
+            ['app-arm64-v8a-release.apk', `shinigami-manga-arm64-v${version}.apk`],
+            ['app-armeabi-v7a-release.apk', `shinigami-manga-armeabi-v${version}.apk`],
+          ];
+          for (const [src, dest] of artifacts) {
+            const srcPath = path.join('android/app/build/outputs/apk/release', src);
+            if (!fs.existsSync(srcPath)) {
+              console.error(`::error::${srcPath} tidak ditemukan.`);
+              process.exit(1);
+            }
+            const destPath = path.join('build', dest);
+            fs.copyFileSync(srcPath, destPath);
+            console.log(`OK  build/${dest} (${(fs.statSync(destPath).size / 1024 / 1024).toFixed(1)} MB)`);
+          }
+          NODE
+
+      - name: Verify release signature
+        # Pastikan APK ditandatangani sertifikat rilis, BUKAN debug key.
+        # (Update di dalam aplikasi ditolak Android bila tanda tangan beda.)
+        run: |
+          set -euo pipefail
+          sdk_root="${ANDROID_HOME:-${ANDROID_SDK_ROOT:?Android SDK path is missing}}"
+          apksigner=$(printf '%s\n' "$sdk_root"/build-tools/*/apksigner | sort -V | tail -n 1)
+          [[ -x "$apksigner" ]] || { echo '::error::apksigner tidak ditemukan di Android SDK Build Tools.'; exit 1; }
+          shopt -s nullglob
+          for apk in build/*.apk; do
+            echo "== $apk"
+            sig=$("$apksigner" verify --print-certs "$apk")
+            echo "$sig"
+            if grep -qi 'CN=Android Debug' <<< "$sig"; then
+              echo "::error::$apk masih memakai debug key - signing rilis gagal."
+              exit 1
+            fi
+          done
+          echo 'Semua APK memakai sertifikat rilis.'
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/*.apk
+          generate_release_notes: true
+          prerelease: false
+          draft: false
+
+      - name: Upload APK artifact (manual run)
+        if: "!startsWith(github.ref, 'refs/tags/v')"
+        uses: actions/upload-artifact@v6
+        with:
+          name: release-apk
+          path: build/*.apk
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0

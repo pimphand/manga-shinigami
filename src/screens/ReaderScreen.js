@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  ActivityIndicator,
   Image,
   Pressable,
   ScrollView,
@@ -11,13 +12,80 @@ import {
 import { useFocusEffect } from '@react-navigation/native';
 import {
   chapterPageUrls,
-  extractItems,
+  extractChapterPage,
   getChapterDetail,
   getChapterList,
   normalizeChapter,
 } from '../api/client';
 import colors from '../theme';
 import Loading from '../components/common/Loading';
+
+// Rasio darurat saat dimensi asli belum/gagal terukur. Gambar tetap
+// dirender penuh (contain) sehingga layar tidak pernah blank hitam —
+// hanya proporsi bingkai yang menyesuaikan setelah ukuran asli ketemu.
+const FALLBACK_ASPECT = 0.7;
+
+// Satu halaman komik: lebar SELALU angka pasti (bukan persen) supaya
+// Yoga tidak gagal resolve ukuran di dalam ScrollView. Tinggi mengikuti
+// aspectRatio dimensi asli + resizeMode contain supaya tidak ter-crop.
+function ReaderPage({ uri, pageWidth }) {
+  const url =
+    typeof uri === 'string' ? uri : uri?.url || uri?.image || uri?.src;
+  const [aspect, setAspect] = useState(null);
+  const [status, setStatus] = useState('loading'); // loading | ok | error
+  const [attempt, setAttempt] = useState(0);
+
+  useEffect(() => {
+    let active = true;
+    setAspect(null);
+    setStatus(url ? 'loading' : 'error');
+    if (!url) return undefined;
+    Image.getSize(
+      url,
+      (w, h) => {
+        if (active && w > 0 && h > 0) setAspect(w / h);
+      },
+      () => {
+        // Gagal ukur bukan berarti gagal tampil: pakai rasio darurat,
+        // keberhasilan final ditentukan oleh onLoad/onError Image.
+        if (active) setAspect(FALLBACK_ASPECT);
+      }
+    );
+    return () => {
+      active = false;
+    };
+  }, [url, attempt]);
+
+  const ratio = aspect ?? FALLBACK_ASPECT;
+
+  return (
+    <View style={[styles.page, { width: pageWidth, aspectRatio: ratio }]}>
+      <Image
+        key={`${url}-${attempt}`}
+        source={{ uri: url }}
+        resizeMode="contain"
+        style={{ width: pageWidth, aspectRatio: ratio }}
+        onLoad={() => setStatus('ok')}
+        onError={() => setStatus('error')}
+      />
+      {status === 'loading' ? (
+        <View style={styles.pageOverlay}>
+          <ActivityIndicator size="small" color={colors.accent} />
+        </View>
+      ) : null}
+      {status === 'error' ? (
+        <Pressable
+          style={styles.pageOverlay}
+          onPress={() => setAttempt((a) => a + 1)}
+        >
+          <Text style={styles.pageErrorText}>
+            Gambar gagal dimuat.{'\n'}Ketuk untuk coba lagi.
+          </Text>
+        </Pressable>
+      ) : null}
+    </View>
+  );
+}
 
 export default function ReaderScreen({ route }) {
   const { mangaId, chapterId, chapter } = route.params || {};
@@ -39,17 +107,36 @@ export default function ReaderScreen({ route }) {
       setLoading(true);
       setError(null);
       try {
-        const res = await getChapterList(mangaId);
-        const list = [...extractItems(res.data).map(normalizeChapter)].sort(
+        const idKey = (c) => String(c?.id ?? c?.chapter_number ?? c?.number ?? '');
+        const findIdx = (arr) => {
+          let i = arr.findIndex((c) => idKey(c) === String(chapterId));
+          if (i < 0) {
+            const num = Number(String(chapterId));
+            i = arr.findIndex((c) => (c?.chapter_number ?? c?.number) === num);
+          }
+          return i;
+        };
+        // Muat halaman berikutnya sampai chapter tujuan ketemu
+        // (daftar chapter memakai cursor pagination, 100/chapter per halaman).
+        const first = extractChapterPage((await getChapterList(mangaId)).data);
+        let list = first.items.map(normalizeChapter);
+        let hasNext = first.hasNext;
+        let cursor = first.nextCursor;
+        let idx = findIdx(list);
+        while (idx < 0 && hasNext && cursor) {
+          const page = extractChapterPage(
+            (await getChapterList(mangaId, { cursor })).data
+          );
+          list = [...list, ...page.items.map(normalizeChapter)];
+          hasNext = page.hasNext;
+          cursor = page.nextCursor;
+          idx = findIdx(list);
+        }
+        list = [...list].sort(
           (a, b) => (b?.chapter_number ?? 0) - (a?.chapter_number ?? 0)
         );
         setChapters(list);
-        const idKey = (c) => String(c?.id ?? c?.chapter_number ?? c?.number ?? '');
-        let idx = list.findIndex((c) => idKey(c) === String(chapterId));
-        if (idx < 0) {
-          const num = Number(String(chapterId));
-          idx = list.findIndex((c) => (c?.chapter_number ?? c?.number) === num);
-        }
+        idx = findIdx(list);
         if (idx < 0) idx = 0;
         setCurrentIndex(idx);
         setCurrentPage(0);
@@ -120,19 +207,9 @@ export default function ReaderScreen({ route }) {
     }
   };
 
-  const renderPage = (uri, i) => {
-    const source = typeof uri === 'string' ? { uri } : { uri: uri?.url || uri?.image || uri?.src };
-    const pageAspect =
-      uri?.aspectRatio ??
-      (uri?.height && uri?.width ? uri.height / uri.width : 2 / 3);
-    return (
-      <Image
-        key={i}
-        source={source}
-        style={{ width: '100%', aspectRatio: pageAspect }}
-      />
-    );
-  };
+  const renderPage = (uri, i) => (
+    <ReaderPage key={i} uri={uri} pageWidth={width} />
+  );
 
   if (loading) {
     return <Loading />;
@@ -150,6 +227,14 @@ export default function ReaderScreen({ route }) {
     return (
       <View style={styles.center}>
         <Text style={styles.errorText}>Chapter tidak ditemukan</Text>
+      </View>
+    );
+  }
+
+  if (!loading && !error && pageUrls.length === 0) {
+    return (
+      <View style={styles.center}>
+        <Text style={styles.errorText}>Chapter ini belum memiliki halaman</Text>
       </View>
     );
   }
@@ -234,8 +319,23 @@ const styles = StyleSheet.create({
   scroll: {
     flex: 1,
   },
+  page: {
+    backgroundColor: '#111',
+    overflow: 'hidden',
+  },
+  pageOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 32,
+  },
+  pageErrorText: {
+    color: colors.secondaryText,
+    fontSize: 13,
+    textAlign: 'center',
+  },
   verticalContent: {
-    paddingTop: 8,
+    paddingTop: 0,
   },
   horizontalScroll: {
     flex: 1,

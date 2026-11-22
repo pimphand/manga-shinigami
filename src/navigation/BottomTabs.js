@@ -9,6 +9,7 @@ import MangaScreen from '../screens/MangaScreen';
 import LibraryScreen from '../screens/LibraryScreen';
 import DetailScreen from '../screens/DetailScreen';
 import ReaderScreen from '../screens/ReaderScreen';
+import SettingsScreen from '../screens/SettingsScreen';
 import colors from '../theme';
 
 const HomeStack = createNativeStackNavigator();
@@ -19,6 +20,7 @@ const TABS = [
   { name: 'Home', component: HomeStackScreen, icon: 'home-outline' },
   { name: 'Komik', component: MangaScreen, icon: 'book-outline' },
   { name: 'Pustaka', component: LibraryScreen, icon: 'bookmark-outline' },
+  { name: 'Pengaturan', component: SettingsScreen, icon: 'settings-outline' },
 ];
 
 const BAR_CONTENT_HEIGHT = 56;

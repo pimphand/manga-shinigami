@@ -16,6 +16,7 @@
     "android": {
       "package": "com.shinigami.app",
       "versionCode": 1,
+      "permissions": ["REQUEST_INSTALL_PACKAGES"],
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#101010"

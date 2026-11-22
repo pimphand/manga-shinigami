@@ -27,7 +27,27 @@ export const getMangaDetail = (id) => api.get(`/manga/detail/${id}`);
 export const getChapterDetail = (chapterId) =>
   api.get(`/chapter/detail/${chapterId}`);
 export const getChapterList = (mangaId, params) =>
-  api.get(`/chapter/${mangaId}/list`, { params: { limit: 100, ...params } });
+  api.get(`/chapter/${mangaId}/list`, {
+    params: {
+      sort_by: 'chapter_number',
+      sort_order: 'desc',
+      limit: 100,
+      ...params,
+    },
+  });
+
+export function extractChapterPage(data) {
+  const items = extractItems(data);
+  const meta = data?.meta || data?.data?.meta || {};
+  const nextCursor = meta.next_cursor ?? meta.nextCursor ?? null;
+  const hasNext =
+    typeof meta.has_next === 'boolean'
+      ? meta.has_next
+      : typeof meta.hasNext === 'boolean'
+        ? meta.hasNext
+        : Boolean(nextCursor);
+  return { items, hasNext, nextCursor };
+}
 
 export function extractItems(data) {
   if (!data) return [];
