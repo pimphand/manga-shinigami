@@ -80,6 +80,23 @@ export function chapterPageUrls(detail) {
   return chapter.data.map((file) => `${base}${chapter.path}${file}`);
 }
 
+// Header yang dipakai backend untuk lolos CDN Shinigami (s1.shinigami.mx).
+// WAJIB dipakai juga saat load gambar via expo-image, kalau tidak CDN bisa
+// menolak (403) atau mengembalikan gambar kualitas rendah / blur.
+export const IMAGE_HEADERS = {
+  Referer: 'https://s1.shinigami.mx/',
+  Origin: 'https://s1.shinigami.mx',
+  'User-Agent':
+    'Mozilla/5.0 (iPhone; CPU iPhone OS 12_0 like Mac OS X) AppleWebKit/604.1.38 (KHTML, like Gecko) Version/12.0 Mobile/15A372 Safari/604.1',
+};
+
+export function imageSource(uri) {
+  if (!uri) return undefined;
+  const url = typeof uri === 'string' ? uri : uri?.url || uri?.image || uri?.src;
+  if (!url) return undefined;
+  return { uri: url, headers: IMAGE_HEADERS };
+}
+
 export function normalizeChapter(item) {
   return {
     ...item,

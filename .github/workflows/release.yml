@@ -1,11 +1,20 @@
 name: Build & Release Android APK
 
-# Cara pakai:
+# Cara pakai (satu-satunya cara menerbitkan update OTA-in-app):
 #   1. Naikkan "version" di app.json + package.json dan "versionCode" di app.json.
-#   2. Buat tag lalu push:  git tag v1.1.0 && git push origin v1.1.0
+#   2. Commit + buat tag lalu push:  git tag v1.1.0 && git push origin v1.1.0
 #   3. Workflow membangun APK per-ABI, menandatangani dengan keystore rilis,
-#      lalu membuat GitHub Release berisi file APK.
-#   4. User update dari dalam aplikasi (Profil > Cek Pembaruan).
+#      lalu membuat GitHub Release berisi 2 file APK LANGSUNG (bukan zip).
+#   4. User update dari dalam aplikasi (Pengaturan > Cek Pembaruan).
+#
+# CATATAN PENTING:
+# - Fitur "Cek Pembaruan" di aplikasi HANYA membaca GitHub Releases.
+#   Selama belum ada tag/release, pesan "Belum ada rilis di GitHub" itu NORMAL.
+# - Tombol "Run workflow" manual (workflow_dispatch) hanya untuk TES build:
+#   hasilnya berupa Artifact yang oleh GitHub SELALU diunduh sebagai file ZIP
+#   berisi 2 APK (arm64 + armeabi). Itu keterbatasan GitHub, bukan bug.
+#   File APK langsung (tanpa zip) hanya ada di halaman GitHub Releases
+#   yang dibuat otomatis saat push tag v*.
 #
 # Secrets yang wajib ada (Settings > Secrets and variables > Actions):
 #   ANDROID_KEYSTORE_BASE64     isi file .keystore/.jks dalam base64
@@ -21,8 +30,6 @@ name: Build & Release Android APK
 
 on:
   push:
-    branches:
-      - main
     tags:
       - 'v*'
   workflow_dispatch:

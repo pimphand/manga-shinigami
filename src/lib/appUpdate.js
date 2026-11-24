@@ -66,6 +66,9 @@ export async function checkForUpdate() {
   if (res.status === 404) {
     throw new Error('Belum ada rilis di GitHub');
   }
+  if (res.status === 403 || res.status === 429) {
+    throw new Error('Gagal cek pembaruan (rate limit GitHub, coba lagi nanti)');
+  }
   if (!res.ok) {
     throw new Error(`Gagal cek pembaruan (${res.status})`);
   }
