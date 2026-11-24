@@ -11,6 +11,7 @@ import {
 } from 'react-native';
 import { Image } from 'expo-image';
 import {
+  IMAGE_HEADERS,
   chapterPageUrls,
   extractChapterPage,
   getChapterDetail,
@@ -50,9 +51,17 @@ const ReaderPage = React.memo(function ReaderPage({ uri, pageWidth, spinner, lab
     <View style={[styles.page, { width: pageWidth, aspectRatio: ratio }]}>
       <Image
         key={`${url}-${attempt}`}
-        source={{ uri: url }}
+        source={url ? { uri: url, headers: IMAGE_HEADERS } : undefined}
         contentFit="contain"
         cachePolicy="memory-disk"
+        // allowDownscaling=false: cegah expo-image mengecilkan halaman komik
+        // besar demi hemat memori — itulah penyebab utama gambar terlihat
+        // blur / tidak HD. recyclingKey + priority bikin halaman terdekat
+        // dimuat tajam duluan tanpa ketukar antar halaman.
+        allowDownscaling={false}
+        priority="high"
+        recyclingKey={url}
+        transition={0}
         style={{ width: pageWidth, aspectRatio: ratio }}
         onLoad={(e) => {
           const w = e?.source?.width;
@@ -175,6 +184,17 @@ export default function ReaderScreen({ route }) {
   }, [loadChapters]);
 
   const currentChapter = chapters[currentIndex] || chapter;
+
+  // Prefetch 2 halaman ke depan (dengan header CDN yang sama) supaya saat
+  // discroll gambar HD sudah ada di cache disk — tidak sempat tampil blur.
+  useEffect(() => {
+    if (!pageUrls.length) return;
+    const next = pageUrls.slice(currentPage + 1, currentPage + 3);
+    if (!next.length) return;
+    next.forEach((u) => {
+      Image.prefetch(u, { headers: IMAGE_HEADERS }).catch(() => {});
+    });
+  }, [currentPage, pageUrls]);
 
   // Reset scroll position only when the chapter or reading mode changes.
   // Never scroll on currentPage change: in vertical mode that would fight
@@ -301,7 +321,7 @@ export default function ReaderScreen({ route }) {
           contentContainerStyle={styles.verticalContent}
           onScroll={onScrollVertical}
           scrollEventThrottle={16}
-          windowSize={3}
+          windowSize={5}
           maxToRenderPerBatch={2}
           initialNumToRender={2}
           removeClippedSubviews
@@ -319,8 +339,8 @@ export default function ReaderScreen({ route }) {
           directionalLockEnabled
           style={styles.horizontalScroll}
           onMomentumScrollEnd={onMomentumHorizontal}
-          windowSize={3}
-          maxToRenderPerBatch={1}
+          windowSize={5}
+          maxToRenderPerBatch={2}
           initialNumToRender={1}
           removeClippedSubviews
           getItemLayout={(_, index) => ({
