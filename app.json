@@ -2,7 +2,7 @@
   "expo": {
     "name": "Shinigami Manga",
     "slug": "shinigami-manga",
-    "version": "1.0.1",
+    "version": "1.0.2",
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
     "backgroundColor": "#101010",
@@ -15,7 +15,7 @@
     "icon": "./assets/icon.png",
     "android": {
       "package": "com.shinigami.app",
-      "versionCode": 2,
+      "versionCode": 3,
       "permissions": [
         "REQUEST_INSTALL_PACKAGES"
       ],
