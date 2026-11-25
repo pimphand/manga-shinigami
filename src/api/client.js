@@ -22,7 +22,7 @@ api.interceptors.response.use(undefined, async (error) => {
   return api(config);
 });
 
-export const getMangaLists = (q, offset = 0, signal) =>
+export const getMangaLists = (q, offset = 0, signal, extraParams) =>
   api.get('/manga/list', {
     params: {
       sort: 'latest',
@@ -30,6 +30,7 @@ export const getMangaLists = (q, offset = 0, signal) =>
       offset,
       limit: 24,
       ...(q ? { q } : {}),
+      ...(extraParams || {}),
     },
     ...(signal ? { signal } : {}),
   });

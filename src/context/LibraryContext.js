@@ -46,6 +46,8 @@ export function LibraryProvider({ children }) {
           chapterNumber: entry?.chapterNumber,
           chapterTitle: entry?.chapterTitle ?? null,
           timestamp: entry?.timestamp || Date.now(),
+          currentPage: entry?.currentPage ?? 0,
+          totalPages: entry?.totalPages ?? 0,
         },
         ...prev.filter(
           (h) =>
@@ -55,6 +57,46 @@ export function LibraryProvider({ children }) {
       ].slice(0, 100);
       AsyncStorage.setItem(HISTORY_KEY, JSON.stringify(next));
       return next;
+    });
+  }, []);
+
+  // Dipakai Reader saat pindah chapter / menyimpan progres halaman:
+  // update entri manga yang sama (pertahankan judul & cover lama),
+  // atau buat entri minimal kalau belum ada riwayat untuk manga ini.
+  const updateHistoryEntry = useCallback((mangaId, patch) => {
+    if (mangaId == null) return;
+    setHistory((prev) => {
+      const idx = prev.findIndex(
+        (h) => String(h?.mangaId) === String(mangaId)
+      );
+      let next;
+      if (idx >= 0) {
+        const merged = {
+          ...prev[idx],
+          ...patch,
+          mangaId: prev[idx]?.mangaId ?? mangaId,
+          timestamp: patch?.timestamp || Date.now(),
+        };
+        next = [merged, ...prev.slice(0, idx), ...prev.slice(idx + 1)];
+      } else {
+        next = [
+          {
+            mangaId,
+            mangaTitle: patch?.mangaTitle ?? 'Manga',
+            mangaCover: patch?.mangaCover ?? null,
+            chapterId: patch?.chapterId ?? null,
+            chapterNumber: patch?.chapterNumber ?? null,
+            chapterTitle: patch?.chapterTitle ?? null,
+            timestamp: patch?.timestamp || Date.now(),
+            currentPage: patch?.currentPage ?? 0,
+            totalPages: patch?.totalPages ?? 0,
+          },
+          ...prev,
+        ];
+      }
+      const sliced = next.slice(0, 100);
+      AsyncStorage.setItem(HISTORY_KEY, JSON.stringify(sliced));
+      return sliced;
     });
   }, []);
 
@@ -90,10 +132,11 @@ export function LibraryProvider({ children }) {
       history,
       toggleFavorite,
       addHistory,
+      updateHistoryEntry,
       clearHistory,
       replaceLibrary,
     }),
-    [favorites, history, toggleFavorite, addHistory, clearHistory, replaceLibrary]
+    [favorites, history, toggleFavorite, addHistory, updateHistoryEntry, clearHistory, replaceLibrary]
   );
 
   return (

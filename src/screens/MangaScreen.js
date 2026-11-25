@@ -48,7 +48,7 @@ function Chips({ options, selected, onSelect }) {
 }
 import { useNavigation } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { extractItems, getMangaLists, normalizeManga } from '../api/client';
+import { extractItems, getMangaLists, getTaxonomyList, normalizeManga } from '../api/client';
 import MangaCard from '../components/MangaCard';
 
 export default function MangaScreen() {
@@ -66,10 +66,34 @@ export default function MangaScreen() {
   const [type, setType] = useState(CHIP_ALL);
   const [genre, setGenre] = useState(CHIP_ALL);
 
-  const genres = useMemo(
+  const derivedGenres = useMemo(
     () => [CHIP_ALL, ...new Set(mangaList.flatMap((m) => taxNames(m, 'Genre')))],
     [mangaList]
   );
+  // Opsi genre dari taxonomy API (lengkap, tidak tergantung halaman
+  // yang sudah ke-load). Fallback ke genre turunan daftar lokal.
+  const [genreOptions, setGenreOptions] = useState([CHIP_ALL]);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await getTaxonomyList('genre');
+        const items = extractItems(res.data);
+        const names = items
+          .map((g) => g?.name ?? g?.title ?? g?.slug)
+          .filter(Boolean);
+        if (!cancelled && names.length > 0) {
+          setGenreOptions([CHIP_ALL, ...new Set(names)]);
+        }
+      } catch (e) {
+        // Abaikan: fallback ke derivedGenres.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  const genres = genreOptions.length > 1 ? genreOptions : derivedGenres;
 
   const activeCount = [status !== 'all', format !== CHIP_ALL, type !== CHIP_ALL, genre !== CHIP_ALL].filter(Boolean).length;
 
@@ -84,7 +108,17 @@ export default function MangaScreen() {
   // belakangan tidak boleh menimpa hasil query terbaru (race condition).
   const searchAbort = useRef(null);
 
-  const loadManga = useCallback(async (search = '', offset = 0) => {
+  // Filter dikirim sebagai params server (backend yang mendukung akan
+  // memfilter di sisi API; yang tidak mendukung diabaikan backend dan
+  // penyaringan client-side di `filtered` tetap jadi fallback).
+  const buildServerParams = (f) => ({
+    ...(f?.status && f.status !== 'all' ? { status: f.status } : {}),
+    ...(f?.format && f.format !== CHIP_ALL ? { format: f.format } : {}),
+    ...(f?.type && f.type !== CHIP_ALL ? { type: f.type } : {}),
+    ...(f?.genre && f.genre !== CHIP_ALL ? { genre: f.genre } : {}),
+  });
+
+  const loadManga = useCallback(async (search = '', offset = 0, filters) => {
     const append = offset > 0;
     let signal;
     if (append) {
@@ -97,7 +131,12 @@ export default function MangaScreen() {
     }
     setError(null);
     try {
-      const res = await getMangaLists(search.trim(), offset, signal);
+      const res = await getMangaLists(
+        search.trim(),
+        offset,
+        signal,
+        buildServerParams(filters)
+      );
       const items = extractItems(res.data).map(normalizeManga);
       setMangaList((prev) => (append ? [...prev, ...items] : items));
       setHasNext(Boolean(res.data?.meta?.has_next));
@@ -120,13 +159,16 @@ export default function MangaScreen() {
 
   const loadMore = () => {
     if (loadingMore || loading || !hasNext) return;
-    loadManga(query, mangaList.length);
+    loadManga(query, mangaList.length, { status, format, type, genre });
   };
 
   useEffect(() => {
-    const timer = setTimeout(() => loadManga(query), 400);
+    const timer = setTimeout(
+      () => loadManga(query, 0, { status, format, type, genre }),
+      400
+    );
     return () => clearTimeout(timer);
-  }, [query, loadManga]);
+  }, [query, status, format, type, genre, loadManga]);
 
   const filtered = useMemo(() => mangaList.filter((m) => {
     const matchesStatus = status === 'all' || m?.status === status;

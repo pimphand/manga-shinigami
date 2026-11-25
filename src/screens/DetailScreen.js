@@ -195,7 +195,13 @@ export default function DetailScreen({ route }) {
         chapterTitle: chapter?.chapter_title || chapter?.title || null,
         timestamp: Date.now(),
       });
-      navigation.navigate('Reader', { mangaId: id, chapterId, chapter });
+      navigation.navigate('Reader', {
+        mangaId: id,
+        chapterId,
+        chapter,
+        mangaTitle: detail?.title || detail?.name,
+        mangaCover: detailCover,
+      });
     },
     [id, detail, addHistory, navigation]
   );

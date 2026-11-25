@@ -150,7 +150,12 @@ export default function LibraryScreen() {
     (entry) => {
       navigation.navigate('Home', {
         screen: 'Reader',
-        params: { mangaId: entry?.mangaId, chapterId: entry?.chapterId },
+        params: {
+          mangaId: entry?.mangaId,
+          chapterId: entry?.chapterId,
+          mangaTitle: entry?.mangaTitle,
+          mangaCover: entry?.mangaCover ?? entry?.cover ?? entry?.thumbnail ?? null,
+        },
       });
     },
     [navigation]

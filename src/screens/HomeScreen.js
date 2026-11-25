@@ -13,7 +13,7 @@ import AppButton from '../components/common/AppButton';
 import Loading from '../components/common/Loading';
 import colors from '../theme';
 import MangaCard from '../components/MangaCard';
-import { extractItems, getHome, getHomeHero, normalizeManga } from '../api/client';
+import { extractItems, getHome, getHomeHero, getMangaLists, normalizeManga } from '../api/client';
 
 export default function HomeScreen() {
   const navigation = useNavigation();
@@ -29,12 +29,25 @@ export default function HomeScreen() {
     setRefreshing(false);
     setError(null);
     try {
-      const [heroRes, homeRes] = await Promise.all([getHomeHero(), getHome()]);
+      const [heroRes, homeRes, latestRes] = await Promise.all([
+        getHomeHero(),
+        getHome(),
+        getMangaLists('', 0).catch(() => null),
+      ]);
       const heroItems = extractItems(heroRes.data).map(normalizeManga);
       const homeItems = extractItems(homeRes.data).map(normalizeManga);
       setHeroes(heroItems);
       setRecommendations(homeItems);
-      setPopular(homeItems);
+      // Populer = daftar latest dari /manga/list (sumber beda, tidak
+      // lagi duplikat isi Rekomendasi). Fallback: paruh kedua home.
+      const latestItems = latestRes
+        ? extractItems(latestRes.data).map(normalizeManga)
+        : [];
+      if (latestItems.length > 0) {
+        setPopular(latestItems);
+      } else {
+        setPopular(homeItems.slice(Math.ceil(homeItems.length / 2)));
+      }
     } catch (e) {
       setError(e?.message || 'Gagal memuat beranda');
     } finally {
