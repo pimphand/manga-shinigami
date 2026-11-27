@@ -27,7 +27,7 @@ import { useLibrary } from '../context/LibraryContext';
 // hanya proporsi bingkai yang menyesuaikan setelah ukuran asli ketemu.
 const FALLBACK_ASPECT = 0.7;
 
-// Kecepatan auto-scroll vertikal (px per detik, interval 50ms).
+// Kecepatan auto-scroll vertikal (px per detik, dijalankan ~60fps).
 const AUTO_SPEEDS = [
   { label: 'Lambat', pxPerSec: 70 },
   { label: 'Normal', pxPerSec: 140 },
@@ -39,19 +39,63 @@ const AUTO_SPEEDS = [
 // aspectRatio dimensi asli + resizeMode contain supaya tidak ter-crop.
 // spinner=true hanya untuk halaman pertama: halaman lain memakai teks
 // statis agar tidak ada belasan animasi loading berjalan bersamaan.
-const ReaderPage = React.memo(function ReaderPage({ uri, pageWidth, spinner, label }) {
+// Dilengkapi reload manual: ketuk overlay error untuk coba lagi, dan jika
+// loading macet (>8 detik) muncul tombol muat ulang.
+const ReaderPage = React.memo(function ReaderPage({
+  uri,
+  pageWidth,
+  spinner,
+  label,
+  reloadToken,
+}) {
   const url =
     typeof uri === 'string' ? uri : uri?.url || uri?.image || uri?.src;
   const [aspect, setAspect] = useState(null);
   const [status, setStatus] = useState('loading'); // loading | ok | error
   const [attempt, setAttempt] = useState(0);
+  const [stuck, setStuck] = useState(false);
 
   // Dimensi asli diambil dari event onLoad expo-image (sudah termasuk
   // cache disk) — tanpa request ukur tambahan via Image.getSize.
   useEffect(() => {
     setAspect(null);
     setStatus(url ? 'loading' : 'error');
+    setStuck(false);
   }, [url, attempt]);
+
+  // Jika gambar tak kunjung ter-load (network macet / CDN timeout tanpa
+  // memicu onError), tandai stuck agar overlay menampilkan tombol reload.
+  useEffect(() => {
+    if (status !== 'loading') return;
+    setStuck(false);
+    const t = setTimeout(() => {
+      setStatus((s) => {
+        if (s === 'loading') setStuck(true);
+        return s;
+      });
+    }, 8000);
+    return () => clearTimeout(t);
+  }, [status, url, attempt]);
+
+  // Reload global dari tombol header: paksa remount Image bila halaman
+  // ini gagal / macet, halaman yang sudah OK tidak ikut dimuat ulang.
+  const lastReloadRef = useRef(reloadToken);
+  useEffect(() => {
+    if (reloadToken !== lastReloadRef.current) {
+      lastReloadRef.current = reloadToken;
+      setStatus((s) => {
+        if (s === 'error' || stuck) setAttempt((a) => a + 1);
+        return s;
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reloadToken]);
+
+  const retry = useCallback(() => {
+    setStuck(false);
+    setStatus('loading');
+    setAttempt((a) => a + 1);
+  }, []);
 
   const ratio = aspect ?? FALLBACK_ASPECT;
 
@@ -76,26 +120,50 @@ const ReaderPage = React.memo(function ReaderPage({ uri, pageWidth, spinner, lab
           const h = e?.source?.height;
           setAspect(w > 0 && h > 0 ? w / h : FALLBACK_ASPECT);
           setStatus('ok');
+          setStuck(false);
         }}
-        onError={() => setStatus('error')}
+        onError={() => {
+          setStatus('error');
+          setStuck(false);
+        }}
       />
       {status === 'loading' ? (
-        <View style={styles.pageOverlay}>
-          {spinner ? (
-            <ActivityIndicator size="small" color={colors.accent} />
-          ) : (
-            <Text style={styles.pagePlaceholderText}>{label ?? '…'}</Text>
-          )}
-        </View>
-      ) : null}
-      {status === 'error' ? (
         <Pressable
           style={styles.pageOverlay}
-          onPress={() => setAttempt((a) => a + 1)}
+          onPress={() => {
+            // Ketuk saat macet = reload manual; saat masih loading awal
+            // jangan lakukan apa-apa supaya tidak spam request.
+            if (stuck) retry();
+          }}
+          disabled={!stuck}
         >
-          <Text style={styles.pageErrorText}>
-            Gambar gagal dimuat.{'\n'}Ketuk untuk coba lagi.
-          </Text>
+          {spinner && !stuck ? (
+            <ActivityIndicator size="small" color={colors.accent} />
+          ) : !stuck ? (
+            <Text style={styles.pagePlaceholderText}>{label ?? '…'}</Text>
+          ) : null}
+          {stuck ? (
+            <View style={styles.reloadBox}>
+              <Text style={styles.pageErrorText}>
+                Gambar lama dimuat.{'\n'}Ketuk untuk muat ulang.
+              </Text>
+              <View style={styles.reloadButton}>
+                <Text style={styles.reloadButtonText}>⟳ Muat Ulang</Text>
+              </View>
+            </View>
+          ) : null}
+        </Pressable>
+      ) : null}
+      {status === 'error' ? (
+        <Pressable style={styles.pageOverlay} onPress={retry}>
+          <View style={styles.reloadBox}>
+            <Text style={styles.pageErrorText}>
+              Gambar gagal dimuat.{'\n'}Ketuk untuk coba lagi.
+            </Text>
+            <View style={styles.reloadButton}>
+              <Text style={styles.reloadButtonText}>⟳ Muat Ulang</Text>
+            </View>
+          </View>
         </Pressable>
       ) : null}
     </View>
@@ -124,6 +192,8 @@ export default function ReaderScreen({ route }) {
   const [pageError, setPageError] = useState(null);
   const [autoScroll, setAutoScroll] = useState(false);
   const [speedIdx, setSpeedIdx] = useState(1);
+  const [showSpeedMenu, setShowSpeedMenu] = useState(false);
+  const [reloadToken, setReloadToken] = useState(0);
   const scrollOffsetRef = useRef(0);
   const restoredChapterRef = useRef(null);
   const progressTimerRef = useRef(null);
@@ -272,25 +342,36 @@ export default function ReaderScreen({ route }) {
 
   // Auto-scroll hanya untuk mode vertikal.
   useEffect(() => {
-    if (mode !== 'vertical') setAutoScroll(false);
+    if (mode !== 'vertical') {
+      setAutoScroll(false);
+      setShowSpeedMenu(false);
+    }
   }, [mode]);
 
+  // Auto-scroll 60fps: langkah kecil tiap ~16ms berdasarkan waktu nyata
+  // (pxPerSec * dt) sehingga pergerakan smooth, bukan lompat tiap 50ms.
+  // scrollToOffset(animated:false) tiap frame = geser kontinu tanpa
+  // animasi susulan yang bikin patah-patah.
   useEffect(() => {
     if (!autoScroll || mode !== 'vertical' || pageLoading || pageUrls.length === 0) {
       return;
     }
-    const step = AUTO_SPEEDS[speedIdx].pxPerSec / 20;
+    const pxPerSec = AUTO_SPEEDS[speedIdx].pxPerSec;
+    let last = Date.now();
     const id = setInterval(() => {
+      const now = Date.now();
+      const dt = Math.min((now - last) / 1000, 0.1); // clamp 100ms
+      last = now;
       const ref = scrollRef.current;
       if (!ref?.scrollToOffset) return;
-      const next = scrollOffsetRef.current + step;
+      const next = scrollOffsetRef.current + pxPerSec * dt;
       scrollOffsetRef.current = next;
       try {
         ref.scrollToOffset({ offset: next, animated: false });
       } catch (e) {
         // Abaikan: list belum siap.
       }
-    }, 50);
+    }, 16);
     return () => clearInterval(id);
   }, [autoScroll, mode, speedIdx, pageLoading, pageUrls.length]);
 
@@ -404,6 +485,8 @@ export default function ReaderScreen({ route }) {
     if (!chapters.length || pageLoading) return;
     const clamped = Math.max(0, Math.min(chapters.length - 1, newIndex));
     if (clamped === currentIndex) return;
+    setShowSpeedMenu(false);
+    setAutoScroll(false);
     setCurrentIndex(clamped);
     setCurrentPage(0);
   };
@@ -448,6 +531,7 @@ export default function ReaderScreen({ route }) {
   const onScrollBeginDrag = () => {
     // Sentuhan manual menghentikan auto-scroll supaya tidak berebut.
     if (autoScroll) setAutoScroll(false);
+    if (showSpeedMenu) setShowSpeedMenu(false);
   };
 
   const onScrollToIndexFailed = (info) => {
@@ -489,10 +573,11 @@ export default function ReaderScreen({ route }) {
           pageWidth={width}
           spinner={index === 0}
           label={`Halaman ${index + 1}`}
+          reloadToken={reloadToken}
         />
       </View>
     ),
-    [width]
+    [width, reloadToken]
   );
 
   const renderHorizontalItem = useCallback(
@@ -507,10 +592,11 @@ export default function ReaderScreen({ route }) {
           pageWidth={width}
           spinner={index === 0}
           label={`Halaman ${index + 1}`}
+          reloadToken={reloadToken}
         />
       </ScrollView>
     ),
-    [width]
+    [width, reloadToken]
   );
 
   const pageKeyExtractor = useCallback((_, index) => String(index), []);
@@ -540,6 +626,14 @@ export default function ReaderScreen({ route }) {
 
   const chapterLabel =
     currentChapter?.chapter_number ?? currentChapter?.number ?? '';
+  const activeSpeedLabel = AUTO_SPEEDS[speedIdx]?.label ?? '';
+  const autoDisabled = mode !== 'vertical' || pageUrls.length === 0 || pageLoading;
+
+  const pickSpeed = (i) => {
+    setSpeedIdx(i);
+    setAutoScroll(true);
+    setShowSpeedMenu(false);
+  };
   const pageIndicator =
     pageUrls.length > 0 ? `${currentPage + 1}/${pageUrls.length}` : '';
 
@@ -618,45 +712,97 @@ export default function ReaderScreen({ route }) {
             Ch. {chapterLabel}
             {pageIndicator ? ` • Hal. ${pageIndicator}` : ''}
           </Text>
+          <Pressable
+            style={styles.infoReload}
+            onPress={() => setReloadToken((t) => t + 1)}
+            hitSlop={8}
+          >
+            <Text style={styles.infoReloadText}>⟳ Gambar</Text>
+          </Pressable>
         </View>
       ) : null}
       <View style={styles.body}>{renderReaderBody()}</View>
+
+      {/* Popup pilihan kecepatan auto-scroll (satu tombol, tidak full). */}
+      {showSpeedMenu && !autoDisabled ? (
+        <Pressable
+          style={styles.speedBackdrop}
+          onPress={() => setShowSpeedMenu(false)}
+        >
+          <View style={styles.speedMenu}>
+            <Text style={styles.speedMenuTitle}>Kecepatan auto-scroll</Text>
+            {AUTO_SPEEDS.map((s, i) => (
+              <Pressable
+                key={s.label}
+                style={[
+                  styles.speedOption,
+                  i === speedIdx && styles.speedOptionActive,
+                ]}
+                onPress={() => pickSpeed(i)}
+              >
+                <Text
+                  style={[
+                    styles.speedOptionText,
+                    i === speedIdx && styles.speedOptionTextActive,
+                  ]}
+                >
+                  {i === speedIdx ? '● ' : '○ '}
+                  {s.label}
+                </Text>
+              </Pressable>
+            ))}
+            {autoScroll ? (
+              <Pressable
+                style={[styles.speedOption, styles.speedStopOption]}
+                onPress={() => {
+                  setAutoScroll(false);
+                  setShowSpeedMenu(false);
+                }}
+              >
+                <Text style={styles.speedStopText}>❚❚ Hentikan</Text>
+              </Pressable>
+            ) : null}
+          </View>
+        </Pressable>
+      ) : null}
 
       <View style={styles.autoBar}>
         <Pressable
           style={[
             styles.autoToggle,
             autoScroll && styles.autoToggleOn,
-            (mode !== 'vertical' || pageUrls.length === 0 || pageLoading) &&
-              styles.controlDisabled,
+            autoDisabled && styles.controlDisabled,
           ]}
           onPress={() => {
-            if (mode !== 'vertical') return;
-            setAutoScroll((v) => !v);
+            if (autoDisabled) return;
+            // Satu tombol: buka menu kecepatan. Pilihan di menu yang
+            // menyalakan auto-scroll; tombol Stop di menu menghentikannya.
+            // Ketuk tombol saat sedang jalan = hentikan langsung.
+            if (autoScroll) {
+              setAutoScroll(false);
+            } else {
+              setShowSpeedMenu((v) => !v);
+            }
           }}
-          disabled={mode !== 'vertical' || pageUrls.length === 0 || pageLoading}
+          onLongPress={() => {
+            if (!autoDisabled) setShowSpeedMenu(true);
+          }}
+          disabled={autoDisabled}
         >
           <Text
             style={[styles.autoToggleText, autoScroll && styles.autoToggleTextOn]}
           >
-            {autoScroll ? '❚❚ Stop' : '▶ Auto'}
+            {autoScroll ? `❚❚ ${activeSpeedLabel}` : '▶ Auto ▾'}
           </Text>
         </Pressable>
-        <View style={styles.speedRow}>
-          {AUTO_SPEEDS.map((s, i) => (
-            <Pressable
-              key={s.label}
-              style={[styles.speedChip, i === speedIdx && styles.speedChipActive]}
-              onPress={() => setSpeedIdx(i)}
-            >
-              <Text
-                style={[styles.speedText, i === speedIdx && styles.speedTextActive]}
-              >
-                {s.label}
-              </Text>
-            </Pressable>
-          ))}
-        </View>
+        {autoScroll ? (
+          <Pressable
+            style={styles.speedChange}
+            onPress={() => setShowSpeedMenu((v) => !v)}
+          >
+            <Text style={styles.speedChangeText}>Ganti ▾</Text>
+          </Pressable>
+        ) : null}
         {mode !== 'vertical' ? (
           <Text style={styles.autoHint}>Auto hanya mode vertikal</Text>
         ) : null}
@@ -771,14 +917,49 @@ const styles = StyleSheet.create({
     opacity: 0.6,
   },
   infoBar: {
+    flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'center',
     paddingVertical: 6,
+    paddingHorizontal: 16,
     backgroundColor: colors.background,
+    gap: 10,
   },
   infoText: {
     color: colors.secondaryText,
     fontSize: 12,
     fontWeight: '600',
+    flexShrink: 1,
+  },
+  infoReload: {
+    backgroundColor: colors.card,
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  infoReloadText: {
+    color: colors.secondaryText,
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  reloadBox: {
+    alignItems: 'center',
+    gap: 10,
+  },
+  reloadButton: {
+    backgroundColor: colors.card,
+    borderRadius: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderWidth: 1,
+    borderColor: colors.accent,
+  },
+  reloadButtonText: {
+    color: colors.accent,
+    fontSize: 13,
+    fontWeight: '700',
   },
   body: {
     flex: 1,
@@ -796,56 +977,101 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   autoBar: {
+    position: 'absolute',
+    left: 12,
+    bottom: 62,
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'flex-start',
     paddingHorizontal: 16,
     paddingVertical: 6,
     gap: 10,
-    backgroundColor: colors.background,
-    borderTopWidth: 1,
-    borderTopColor: colors.border,
+    backgroundColor: 'transparent',
+    borderTopWidth: 0,
+    zIndex: 5,
+    pointerEvents: 'box-none',
   },
   autoToggle: {
-    backgroundColor: colors.card,
-    borderRadius: 8,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    borderRadius: 20,
     paddingHorizontal: 14,
     paddingVertical: 8,
-    borderWidth: 1,
-    borderColor: colors.border,
+    borderWidth: 0,
   },
   autoToggleOn: {
-    backgroundColor: colors.accent,
+    backgroundColor: 'rgba(0,0,0,0.6)',
     borderColor: colors.accent,
+    borderWidth: 1,
   },
   autoToggleText: {
-    color: colors.text,
+    color: '#fff',
     fontSize: 13,
     fontWeight: '700',
   },
   autoToggleTextOn: {
-    color: '#000',
+    color: colors.accent,
   },
-  speedRow: {
-    flexDirection: 'row',
-    gap: 6,
-    flex: 1,
+  speedChange: {
+    borderRadius: 20,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    borderWidth: 0,
   },
-  speedChip: {
-    borderRadius: 12,
-    paddingHorizontal: 10,
-    paddingVertical: 5,
+  speedChangeText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  speedBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 10,
+    justifyContent: 'flex-end',
+    alignItems: 'center',
+    paddingBottom: 130,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+  },
+  speedMenu: {
+    width: 230,
     backgroundColor: colors.card,
+    borderRadius: 12,
+    padding: 8,
+    borderWidth: 1,
+    borderColor: colors.border,
   },
-  speedChipActive: {
-    backgroundColor: colors.accent,
-  },
-  speedText: {
+  speedMenuTitle: {
     color: colors.secondaryText,
     fontSize: 11,
+    fontWeight: '700',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  speedOption: {
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  speedOptionActive: {
+    backgroundColor: '#3a2f18',
+  },
+  speedOptionText: {
+    color: colors.text,
+    fontSize: 14,
     fontWeight: '600',
   },
-  speedTextActive: {
-    color: '#000',
+  speedOptionTextActive: {
+    color: colors.accent,
+  },
+  speedStopOption: {
+    marginTop: 4,
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
+    borderRadius: 0,
+  },
+  speedStopText: {
+    color: '#ff7b7b',
+    fontSize: 14,
+    fontWeight: '700',
   },
   autoHint: {
     color: colors.inactive,
